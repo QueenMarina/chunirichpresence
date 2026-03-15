@@ -68,3 +68,7 @@ This only works with the official version of Discord, Vesktop uses `arrpc` and i
 ## Testing
 
 This has only been tested in Chunithm XVERSE running under wine in Linux, using this [rpc bridge](https://github.com/EnderIce2/rpc-bridge) and the official Discord desktop app
+
+## Disclaimer
+
+Partially coded with ChatGPT Codex
