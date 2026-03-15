@@ -6,8 +6,8 @@ It is built as an injectable DLL that you can add to your `launch.bat`
 ## Preview
 
 <p>
-  <img src="../images/song_select.png" height="320" />
-  <img src="../images/now_playing.png" height="320" />
+  <img src="images/song_select.png" height="320" />
+  <img src="images/now_playing.png" height="320" />
 </p>
 
 ## Configuration (segatools.ini)
