@@ -1,36 +1,26 @@
+mod logging;
+mod memory;
 mod types;
 
 use configparser::ini::Ini;
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
-use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::panic;
+use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Once, OnceLock, RwLock};
+use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use types::Song;
+use std::time::{Duration, Instant};
+use logging::{debug_logging_enabled, log_file_path, runtime_base_dir, set_dll_module};
+use memory::{
+    log_memory_probe_status, log_memory_snapshot, log_resolved_game_module,
+    read_presence_state_from_memory,
+};
+use types::{PresenceState, RichPresenceConfig, Song};
 use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HMODULE, TRUE};
-use windows_sys::Win32::System::Console::AllocConsole;
-use windows_sys::Win32::System::Diagnostics::Debug::{SetUnhandledExceptionFilter, EXCEPTION_POINTERS};
-use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleA};
+use windows_sys::Win32::System::LibraryLoader::DisableThreadLibraryCalls;
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_sys::Win32::System::Threading::CreateThread;
-
-// Offset to get internal song ID
-const SONG_ID_BASE_OFFSET: usize = 0x0180EDF4;
-const SONG_ID_OFFSET: usize = 0xD60;
-
-// Offset to get difficulty level of currently selected song
-const DIFFICULTY_BASE_OFFSET: usize = 0x0180EF28;
-const DIFFICULTY_OFFSETS: &[usize; 2] = &[0x44, 0x15C];
-
-// Offset to get if the player is currently playing
-const PLAY_STATE_BASE_OFFSET: usize = 0x01839540;
-const PLAY_STATE_OFFSETS: &[usize; 5] = &[0x18, 0x1D4, 0x0, 0xD8, 0xC];
 
 // music.json gives us all songs from the japanese release, we can then use image to get image url to give to discord
 // Taken from here https://github.com/zetaraku/arcade-songs-fetch/blob/master/src/chunithm/fetch-songs.ts
@@ -47,30 +37,11 @@ const SONGS_FETCH_RETRIES: usize = 5;
 const SONGS_FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
 const SONGS_CACHE_FILE_NAME: &str = "chunithm_songs_cache.json";
 const SEGATOOLS_INI_FILE_NAME: &str = "segatools.ini";
-const LOG_FILE_NAME: &str = "chunirichpresence.log";
-const CRASH_LOG_FILE_NAME: &str = "chunirichpresence_crash.log";
-
-static LOG_FILE: OnceLock<Mutex<Option<fs::File>>> = OnceLock::new();
-static DIAGNOSTICS_HOOKS: Once = Once::new();
 
 macro_rules! log {
     ($($arg:tt)*) => {{
-        log_message(format!($($arg)*));
+        crate::logging::log_message(format!($($arg)*));
     }};
-}
-
-#[derive(Clone, Debug)]
-struct RichPresenceConfig {
-    logo_url: String,
-    game_name: String,
-    discord_app_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum PresenceState {
-    Default,
-    UnknownSong(i32),
-    Song { id: i32, difficulty: i32 },
 }
 
 impl Default for RichPresenceConfig {
@@ -83,82 +54,6 @@ impl Default for RichPresenceConfig {
     }
 }
 
-unsafe fn get_module_handle() -> Option<isize> {
-    let module_handle = GetModuleHandleA(b"chusanApp.exe\0".as_ptr());
-
-    if module_handle == 0 {
-        return None;
-    }
-
-    Some(module_handle)
-}
-
-unsafe fn get_current_song_id() -> Option<i32> {
-    let module_handle = get_module_handle()?;
-
-    let base_ptr_addr = (module_handle as usize) + SONG_ID_BASE_OFFSET;
-
-    let ptr_value = *(base_ptr_addr as *const usize);
-    if ptr_value == 0 {
-        return None;
-    }
-
-    let song_id_addr = ptr_value + SONG_ID_OFFSET;
-    let song_id = *(song_id_addr as *const i32);
-
-    Some(song_id)
-}
-
-unsafe fn get_is_playing() -> Option<bool> {
-    let module_handle = get_module_handle()?;
-    let base_ptr_addr = (module_handle as usize) + PLAY_STATE_BASE_OFFSET;
-
-
-    let mut addr = *(base_ptr_addr as *const usize);
-    if addr == 0 {
-        return None;
-    }
-
-
-    for &offset in PLAY_STATE_OFFSETS.iter().take(PLAY_STATE_OFFSETS.len() - 1) {
-        let next_ptr_addr = addr + offset;
-        addr = *(next_ptr_addr as *const usize);
-        if addr == 0 {
-            return None;
-        }
-    }
-
-    let last_offset = PLAY_STATE_OFFSETS[PLAY_STATE_OFFSETS.len() - 1];
-    let play_state_addr = addr + last_offset;
-    let play_state = *(play_state_addr as *const i32);
-
-    Some(play_state > 7)
-}
-
-unsafe fn get_current_difficulty() -> Option<i32> {
-    let module_handle = get_module_handle()?;
-    let base_ptr_addr = (module_handle as usize) + DIFFICULTY_BASE_OFFSET;
-
-    let mut addr = *(base_ptr_addr as *const usize);
-    if addr == 0 {
-        return None;
-    }
-
-    for &offset in DIFFICULTY_OFFSETS.iter().take(DIFFICULTY_OFFSETS.len() - 1) {
-        let next_ptr_addr = addr + offset;
-        addr = *(next_ptr_addr as *const usize);
-        if addr == 0 {
-            return None;
-        }
-    }
-
-    let last_offset = DIFFICULTY_OFFSETS[DIFFICULTY_OFFSETS.len() - 1];
-    let difficulty_addr = addr + last_offset;
-    let difficulty = *(difficulty_addr as *const i32);
-
-    Some(difficulty)
-}
-
 fn difficulty_label(difficulty: i32) -> &'static str {
     match difficulty {
         0 => "BASIC",
@@ -168,22 +63,6 @@ fn difficulty_label(difficulty: i32) -> &'static str {
         4 => "ULTIMA",
         _ => "UNKNOWN",
     }
-}
-
-fn runtime_base_dir() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn log_file_path() -> PathBuf {
-    runtime_base_dir().join(LOG_FILE_NAME)
-}
-
-fn crash_log_path() -> PathBuf {
-    runtime_base_dir().join(CRASH_LOG_FILE_NAME)
 }
 
 fn songs_cache_path() -> PathBuf {
@@ -216,112 +95,6 @@ fn sanitize_ini_value(value: Option<String>) -> Option<String> {
     }
 }
 
-fn timestamp_string() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}.{:03}", now.as_secs(), now.subsec_millis())
-}
-
-fn open_append_file(path: PathBuf) -> Option<fs::File> {
-    OpenOptions::new().create(true).append(true).open(path).ok()
-}
-
-fn append_general_log_line(line: &str) {
-    let log_file = LOG_FILE.get_or_init(|| Mutex::new(open_append_file(log_file_path())));
-    let Ok(mut file_guard) = log_file.lock() else {
-        return;
-    };
-
-    if file_guard.is_none() {
-        *file_guard = open_append_file(log_file_path());
-    }
-
-    if let Some(file) = file_guard.as_mut() {
-        let _ = writeln!(file, "{}", line);
-        let _ = file.flush();
-    }
-}
-
-fn append_crash_log_line(line: &str) {
-    if let Some(mut file) = open_append_file(crash_log_path()) {
-        let _ = writeln!(file, "{}", line);
-        let _ = file.flush();
-    }
-}
-
-fn log_message(message: String) {
-    let line = format!("[{}][ChuniRichPresence] {}", timestamp_string(), message);
-    println!("{}", line);
-    append_general_log_line(&line);
-}
-
-fn write_fatal_log(kind: &str, details: &str) {
-    let header = format!(
-        "[{}][ChuniRichPresence] Fatal {} detected",
-        timestamp_string(),
-        kind
-    );
-    let body = format!("{}\n{}", header, details);
-    println!("{}", header);
-    append_general_log_line(&header);
-    append_crash_log_line(&body);
-}
-
-fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic payload".to_string()
-    }
-}
-
-unsafe extern "system" fn unhandled_exception_filter(
-    exception_info: *const EXCEPTION_POINTERS,
-) -> i32 {
-    let details = if exception_info.is_null() {
-        "Windows exception info pointer was null".to_string()
-    } else {
-        let pointers = &*exception_info;
-        if pointers.ExceptionRecord.is_null() {
-            "Windows exception record pointer was null".to_string()
-        } else {
-            let record = &*pointers.ExceptionRecord;
-            format!(
-                "Exception code: 0x{:08X}\nException address: {:p}",
-                record.ExceptionCode as u32,
-                record.ExceptionAddress
-            )
-        }
-    };
-
-    write_fatal_log("unhandled exception", &details);
-    0
-}
-
-fn install_diagnostics_hooks() {
-    DIAGNOSTICS_HOOKS.call_once(|| {
-        panic::set_hook(Box::new(|panic_info| {
-            let location = panic_info
-                .location()
-                .map(|location| format!("{}:{}", location.file(), location.line()))
-                .unwrap_or_else(|| "unknown location".to_string());
-            let payload = panic_payload_to_string(panic_info.payload());
-            let backtrace = Backtrace::force_capture();
-            let details = format!(
-                "Panic location: {}\nPanic message: {}\nBacktrace:\n{}",
-                location, payload, backtrace
-            );
-            write_fatal_log("panic", &details);
-        }));
-
-        unsafe {
-            SetUnhandledExceptionFilter(Some(unhandled_exception_filter));
-        }
-    });
-}
 
 fn load_presence_config() -> RichPresenceConfig {
     let ini_path = segatools_ini_path();
@@ -625,14 +398,14 @@ fn update_presence(
     }
 }
 
-fn log_started_playing(current_song_id: Option<i32>) {
+pub(crate) fn log_started_playing(current_song_id: Option<i32>) {
     match current_song_id {
         Some(song_id) => log!("Started playing, Song ID: {}", song_id),
         None => log!("Started playing, Song ID unavailable"),
     }
 }
 
-fn resolve_playing_presence_state(
+pub(crate) fn resolve_playing_presence_state(
     songs_by_id: &Arc<RwLock<HashMap<i32, Song>>>,
     current_song_id: Option<i32>,
     current_difficulty: i32,
@@ -669,36 +442,6 @@ fn resolve_playing_presence_state(
         }
         None => PresenceState::UnknownSong(current_difficulty),
     }
-}
-
-unsafe fn read_presence_state_from_memory(
-    songs_by_id: &Arc<RwLock<HashMap<i32, Song>>>,
-    was_playing: bool,
-    last_song_id: &mut i32,
-) -> Option<(bool, PresenceState)> {
-    let is_playing = get_is_playing()?;
-    if !is_playing {
-        if was_playing {
-            log!("Stopped playing, back to song select");
-        }
-        *last_song_id = -1;
-        return Some((false, PresenceState::Default));
-    }
-
-    let current_song_id = get_current_song_id();
-    let current_difficulty = get_current_difficulty().unwrap_or(-1);
-
-    if !was_playing {
-        log_started_playing(current_song_id);
-    }
-
-    let desired_presence_state = resolve_playing_presence_state(
-        songs_by_id,
-        current_song_id,
-        current_difficulty,
-        last_song_id,
-    );
-    Some((true, desired_presence_state))
 }
 
 fn reconnect_discord_if_needed(
@@ -746,14 +489,10 @@ fn apply_presence_state_if_needed(
 }
 
 fn main_thread() {
-    unsafe {
-        AllocConsole();
-    }
-    install_diagnostics_hooks();
     log!("Injected successfully into Chunithm!");
     log!("Runtime base directory: {}", runtime_base_dir().display());
     log!("General log file: {}", log_file_path().display());
-    log!("Crash log file: {}", crash_log_path().display());
+    log_resolved_game_module();
     let presence_config = load_presence_config();
 
     let songs_by_id = Arc::new(RwLock::new(match load_songs_from_cache() {
@@ -772,6 +511,7 @@ fn main_thread() {
     let mut last_discord_connect_attempt = Instant::now();
 
     let mut last_song_id = -1;
+    let mut latched_difficulty = None;
     let mut was_playing = false;
     let mut memory_read_available = true;
 
@@ -783,8 +523,20 @@ fn main_thread() {
             &presence_config,
         );
 
+        if debug_logging_enabled() {
+            log_memory_snapshot();
+            log_memory_probe_status();
+        }
+
         let Some((is_playing, desired_presence_state)) =
-            (unsafe { read_presence_state_from_memory(&songs_by_id, was_playing, &mut last_song_id) })
+            (unsafe {
+                read_presence_state_from_memory(
+                    &songs_by_id,
+                    was_playing,
+                    &mut last_song_id,
+                    &mut latched_difficulty,
+                )
+            })
         else {
             if memory_read_available {
                 log!("Memory read unavailable, keeping default presence until pointers recover");
@@ -838,6 +590,7 @@ pub extern "system" fn DllMain(
     match fdw_reason {
         DLL_PROCESS_ATTACH => {
             unsafe {
+                set_dll_module(hinst_dll);
                 DisableThreadLibraryCalls(hinst_dll);
 
                 let thread_handle = CreateThread(
