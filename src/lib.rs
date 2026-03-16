@@ -2,18 +2,23 @@ mod types;
 
 use configparser::ini::Ini;
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
+use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::panic;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, Once, OnceLock, RwLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use types::Song;
-use windows_sys::Win32::Foundation::{BOOL, HMODULE, TRUE};
+use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HMODULE, TRUE};
 use windows_sys::Win32::System::Console::AllocConsole;
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleA;
+use windows_sys::Win32::System::Diagnostics::Debug::{SetUnhandledExceptionFilter, EXCEPTION_POINTERS};
+use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleHandleA};
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
+use windows_sys::Win32::System::Threading::CreateThread;
 
 // Offset to get internal song ID
 const SONG_ID_BASE_OFFSET: usize = 0x0180EDF4;
@@ -42,10 +47,15 @@ const SONGS_FETCH_RETRIES: usize = 5;
 const SONGS_FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
 const SONGS_CACHE_FILE_NAME: &str = "chunithm_songs_cache.json";
 const SEGATOOLS_INI_FILE_NAME: &str = "segatools.ini";
+const LOG_FILE_NAME: &str = "chunirichpresence.log";
+const CRASH_LOG_FILE_NAME: &str = "chunirichpresence_crash.log";
+
+static LOG_FILE: OnceLock<Mutex<Option<fs::File>>> = OnceLock::new();
+static DIAGNOSTICS_HOOKS: Once = Once::new();
 
 macro_rules! log {
     ($($arg:tt)*) => {{
-        println!("[ChuniRichPresence] {}", format_args!($($arg)*));
+        log_message(format!($($arg)*));
     }};
 }
 
@@ -84,7 +94,7 @@ unsafe fn get_module_handle() -> Option<isize> {
 }
 
 unsafe fn get_current_song_id() -> Option<i32> {
-    let module_handle = get_module_handle().unwrap();
+    let module_handle = get_module_handle()?;
 
     let base_ptr_addr = (module_handle as usize) + SONG_ID_BASE_OFFSET;
 
@@ -168,6 +178,14 @@ fn runtime_base_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+fn log_file_path() -> PathBuf {
+    runtime_base_dir().join(LOG_FILE_NAME)
+}
+
+fn crash_log_path() -> PathBuf {
+    runtime_base_dir().join(CRASH_LOG_FILE_NAME)
+}
+
 fn songs_cache_path() -> PathBuf {
     runtime_base_dir().join(SONGS_CACHE_FILE_NAME)
 }
@@ -196,6 +214,113 @@ fn sanitize_ini_value(value: Option<String>) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn timestamp_string() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}.{:03}", now.as_secs(), now.subsec_millis())
+}
+
+fn open_append_file(path: PathBuf) -> Option<fs::File> {
+    OpenOptions::new().create(true).append(true).open(path).ok()
+}
+
+fn append_general_log_line(line: &str) {
+    let log_file = LOG_FILE.get_or_init(|| Mutex::new(open_append_file(log_file_path())));
+    let Ok(mut file_guard) = log_file.lock() else {
+        return;
+    };
+
+    if file_guard.is_none() {
+        *file_guard = open_append_file(log_file_path());
+    }
+
+    if let Some(file) = file_guard.as_mut() {
+        let _ = writeln!(file, "{}", line);
+        let _ = file.flush();
+    }
+}
+
+fn append_crash_log_line(line: &str) {
+    if let Some(mut file) = open_append_file(crash_log_path()) {
+        let _ = writeln!(file, "{}", line);
+        let _ = file.flush();
+    }
+}
+
+fn log_message(message: String) {
+    let line = format!("[{}][ChuniRichPresence] {}", timestamp_string(), message);
+    println!("{}", line);
+    append_general_log_line(&line);
+}
+
+fn write_fatal_log(kind: &str, details: &str) {
+    let header = format!(
+        "[{}][ChuniRichPresence] Fatal {} detected",
+        timestamp_string(),
+        kind
+    );
+    let body = format!("{}\n{}", header, details);
+    println!("{}", header);
+    append_general_log_line(&header);
+    append_crash_log_line(&body);
+}
+
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+unsafe extern "system" fn unhandled_exception_filter(
+    exception_info: *const EXCEPTION_POINTERS,
+) -> i32 {
+    let details = if exception_info.is_null() {
+        "Windows exception info pointer was null".to_string()
+    } else {
+        let pointers = &*exception_info;
+        if pointers.ExceptionRecord.is_null() {
+            "Windows exception record pointer was null".to_string()
+        } else {
+            let record = &*pointers.ExceptionRecord;
+            format!(
+                "Exception code: 0x{:08X}\nException address: {:p}",
+                record.ExceptionCode as u32,
+                record.ExceptionAddress
+            )
+        }
+    };
+
+    write_fatal_log("unhandled exception", &details);
+    0
+}
+
+fn install_diagnostics_hooks() {
+    DIAGNOSTICS_HOOKS.call_once(|| {
+        panic::set_hook(Box::new(|panic_info| {
+            let location = panic_info
+                .location()
+                .map(|location| format!("{}:{}", location.file(), location.line()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            let payload = panic_payload_to_string(panic_info.payload());
+            let backtrace = Backtrace::force_capture();
+            let details = format!(
+                "Panic location: {}\nPanic message: {}\nBacktrace:\n{}",
+                location, payload, backtrace
+            );
+            write_fatal_log("panic", &details);
+        }));
+
+        unsafe {
+            SetUnhandledExceptionFilter(Some(unhandled_exception_filter));
+        }
+    });
 }
 
 fn load_presence_config() -> RichPresenceConfig {
@@ -235,6 +360,27 @@ fn load_presence_config() -> RichPresenceConfig {
     );
 
     config
+}
+
+fn presence_state_description(
+    state: &PresenceState,
+    songs_by_id: &Arc<RwLock<HashMap<i32, Song>>>,
+) -> String {
+    match state {
+        PresenceState::Default => "default presence (song select)".to_string(),
+        PresenceState::UnknownSong(difficulty) => {
+            format!("unknown song ({})", difficulty_label(*difficulty))
+        }
+        PresenceState::Song { id, difficulty } => match get_song_by_id(songs_by_id, *id) {
+            Some(song) => format!(
+                "song {} - {} ({})",
+                song.title,
+                song.artist,
+                difficulty_label(*difficulty)
+            ),
+            None => format!("song id {} missing from dataset ({})", id, difficulty_label(*difficulty)),
+        },
+    }
 }
 
 fn parse_songs_json(bytes: &[u8]) -> Result<Vec<Song>, serde_json::Error> {
@@ -427,12 +573,33 @@ fn create_discord_client(app_id: &str) -> Option<DiscordIpcClient> {
     }
 }
 
+fn connect_discord_and_set_default(
+    current_presence_state: &mut Option<PresenceState>,
+    config: &RichPresenceConfig,
+) -> Option<DiscordIpcClient> {
+    let mut client = create_discord_client(&config.discord_app_id)?;
+
+    if update_presence(
+        &mut client,
+        &PresenceState::Default,
+        &Arc::new(RwLock::new(HashMap::new())),
+        config,
+    ) {
+        *current_presence_state = Some(PresenceState::Default);
+    } else {
+        *current_presence_state = None;
+    }
+
+    Some(client)
+}
+
 fn update_presence(
     client: &mut DiscordIpcClient,
     state: &PresenceState,
     songs_by_id: &Arc<RwLock<HashMap<i32, Song>>>,
     config: &RichPresenceConfig,
 ) -> bool {
+    let activity_description = presence_state_description(state, songs_by_id);
     let activity = match state {
         PresenceState::Default => default_activity(config),
         PresenceState::UnknownSong(difficulty) => unknown_song_activity(*difficulty, config),
@@ -443,9 +610,16 @@ fn update_presence(
     };
 
     match client.set_activity(activity) {
-        Ok(_) => true,
+        Ok(_) => {
+            log!("Discord presence updated: {}", activity_description);
+            true
+        }
         Err(error) => {
-            log!("Failed to update Discord RPC: {}", error);
+            log!(
+                "Failed to update Discord RPC for {}: {}",
+                activity_description,
+                error
+            );
             false
         }
     }
@@ -531,7 +705,7 @@ fn reconnect_discord_if_needed(
     discord_client: &mut Option<DiscordIpcClient>,
     last_discord_connect_attempt: &mut Instant,
     current_presence_state: &mut Option<PresenceState>,
-    discord_app_id: &str,
+    config: &RichPresenceConfig,
 ) {
     if discord_client.is_some() {
         return;
@@ -542,10 +716,7 @@ fn reconnect_discord_if_needed(
     }
 
     *last_discord_connect_attempt = Instant::now();
-    *discord_client = create_discord_client(discord_app_id);
-    if discord_client.is_some() {
-        *current_presence_state = None;
-    }
+    *discord_client = connect_discord_and_set_default(current_presence_state, config);
 }
 
 fn apply_presence_state_if_needed(
@@ -578,7 +749,11 @@ fn main_thread() {
     unsafe {
         AllocConsole();
     }
+    install_diagnostics_hooks();
     log!("Injected successfully into Chunithm!");
+    log!("Runtime base directory: {}", runtime_base_dir().display());
+    log!("General log file: {}", log_file_path().display());
+    log!("Crash log file: {}", crash_log_path().display());
     let presence_config = load_presence_config();
 
     let songs_by_id = Arc::new(RwLock::new(match load_songs_from_cache() {
@@ -592,27 +767,47 @@ fn main_thread() {
     let songs_refresh_handle = Arc::clone(&songs_by_id);
     thread::spawn(move || refresh_songs_from_online(songs_refresh_handle));
 
-    let mut discord_client = create_discord_client(&presence_config.discord_app_id);
-    let mut last_discord_connect_attempt = Instant::now();
     let mut current_presence_state: Option<PresenceState> = None;
+    let mut discord_client = connect_discord_and_set_default(&mut current_presence_state, &presence_config);
+    let mut last_discord_connect_attempt = Instant::now();
 
     let mut last_song_id = -1;
     let mut was_playing = false;
+    let mut memory_read_available = true;
 
     loop {
         reconnect_discord_if_needed(
             &mut discord_client,
             &mut last_discord_connect_attempt,
             &mut current_presence_state,
-            &presence_config.discord_app_id,
+            &presence_config,
         );
 
         let Some((is_playing, desired_presence_state)) =
             (unsafe { read_presence_state_from_memory(&songs_by_id, was_playing, &mut last_song_id) })
         else {
+            if memory_read_available {
+                log!("Memory read unavailable, keeping default presence until pointers recover");
+                memory_read_available = false;
+            }
+            if discord_client.is_some() && current_presence_state.is_none() {
+                apply_presence_state_if_needed(
+                    &mut discord_client,
+                    &mut current_presence_state,
+                    PresenceState::Default,
+                    &songs_by_id,
+                    &presence_config,
+                    &mut last_discord_connect_attempt,
+                );
+            }
             thread::sleep(Duration::from_secs(1));
             continue;
         };
+
+        if !memory_read_available {
+            log!("Memory read recovered");
+            memory_read_available = true;
+        }
 
         apply_presence_state_if_needed(
             &mut discord_client,
@@ -628,6 +823,11 @@ fn main_thread() {
     }
 }
 
+unsafe extern "system" fn main_thread_entry(_: *mut c_void) -> u32 {
+    main_thread();
+    0
+}
+
 #[no_mangle]
 #[allow(non_snake_case, unused_variables)]
 pub extern "system" fn DllMain(
@@ -637,7 +837,22 @@ pub extern "system" fn DllMain(
 ) -> BOOL {
     match fdw_reason {
         DLL_PROCESS_ATTACH => {
-            thread::spawn(main_thread);
+            unsafe {
+                DisableThreadLibraryCalls(hinst_dll);
+
+                let thread_handle = CreateThread(
+                    std::ptr::null(),
+                    0,
+                    Some(main_thread_entry),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                );
+
+                if thread_handle != 0 {
+                    CloseHandle(thread_handle);
+                }
+            }
             TRUE
         }
         _ => TRUE,
