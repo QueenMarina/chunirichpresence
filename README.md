@@ -34,14 +34,19 @@ You do not need to create a Discord app ID, you can use the provided one, but th
 
 1. Install Rust using rustup:
    - https://rustup.rs
-2. Add the Windows GNU 32-bit target:
-   - `rustup target add i686-pc-windows-gnu`
-3. Build release DLL:
-   - `cargo build --target i686-pc-windows-gnu --release`
+2. Add the target for your build machine:
+   - Linux: `rustup target add i686-pc-windows-gnu`
+   - Windows: `rustup target add i686-pc-windows-msvc`
+3. Build:
+   - Linux / Wine:
+     `cargo build --target i686-pc-windows-gnu --release`
+   - Native Windows:
+     `cargo build --target i686-pc-windows-msvc --release`
 
 Build output:
 
 - `target/i686-pc-windows-gnu/release/chunirichpresence.dll`
+- `target/i686-pc-windows-msvc/release/chunirichpresence.dll`
 
 ## How to add
 
@@ -56,6 +61,17 @@ inject_x86 -d -k chusanhook_x86.dll -k chunirichpresence.dll chusanApp.exe
 ```
 
 If your `launch.bat` already injects DLLs, append `chunirichpresence.dll` to that existing list.
+
+## Logging
+
+Debug logs are only written when `CHUNIRICHPRESENCE_DEBUG` is enabled.
+
+- Windows `launch.bat` example:
+  `set CHUNIRICHPRESENCE_DEBUG=1`
+- Linux shell example:
+  `export CHUNIRICHPRESENCE_DEBUG=1`
+
+When enabled, logs are written to `chunirichpresence.log` next to `chunirichpresence.dll`
 
 ## How-to on Linux
 
