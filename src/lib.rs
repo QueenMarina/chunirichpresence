@@ -39,6 +39,7 @@ const DEFAULT_GAME_NAME: &str = "Chunithm";
 const DEFAULT_DISCORD_APP_ID: &str = "1482780703128289493";
 
 const DISCORD_RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
+const PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const SONGS_FETCH_RETRIES: usize = 5;
 const SONGS_FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
 const SONGS_CACHE_FILE_NAME: &str = "chunithm_songs_cache.json";
@@ -405,6 +406,7 @@ fn create_discord_client(app_id: &str) -> Option<DiscordIpcClient> {
 fn connect_discord_and_set_default(
     current_presence_state: &mut Option<PresenceState>,
     config: &RichPresenceConfig,
+    last_presence_update: &mut Instant,
 ) -> Option<DiscordIpcClient> {
     let mut client = create_discord_client(&config.discord_app_id)?;
 
@@ -415,6 +417,7 @@ fn connect_discord_and_set_default(
         config,
     ) {
         *current_presence_state = Some(PresenceState::Default);
+        *last_presence_update = Instant::now();
     } else {
         *current_presence_state = None;
     }
@@ -505,6 +508,7 @@ fn reconnect_discord_if_needed(
     last_discord_connect_attempt: &mut Instant,
     current_presence_state: &mut Option<PresenceState>,
     config: &RichPresenceConfig,
+    last_presence_update: &mut Instant,
 ) {
     if discord_client.is_some() {
         return;
@@ -515,7 +519,11 @@ fn reconnect_discord_if_needed(
     }
 
     *last_discord_connect_attempt = Instant::now();
-    *discord_client = connect_discord_and_set_default(current_presence_state, config);
+    *discord_client = connect_discord_and_set_default(
+        current_presence_state,
+        config,
+        last_presence_update,
+    );
 }
 
 fn apply_presence_state_if_needed(
@@ -525,17 +533,22 @@ fn apply_presence_state_if_needed(
     songs_by_id: &Arc<RwLock<HashMap<i32, Song>>>,
     config: &RichPresenceConfig,
     last_discord_connect_attempt: &mut Instant,
+    last_presence_update: &mut Instant,
 ) {
     let Some(client) = discord_client.as_mut() else {
         return;
     };
 
-    if current_presence_state.as_ref() == Some(&desired_presence_state) {
+    let state_changed = current_presence_state.as_ref() != Some(&desired_presence_state);
+    let refresh_due = last_presence_update.elapsed() >= PRESENCE_REFRESH_INTERVAL;
+
+    if !state_changed && !refresh_due {
         return;
     }
 
     if update_presence(client, &desired_presence_state, songs_by_id, config) {
         *current_presence_state = Some(desired_presence_state);
+        *last_presence_update = Instant::now();
         return;
     }
 
@@ -566,7 +579,12 @@ fn main_thread() {
     thread::spawn(move || refresh_songs_from_online(songs_refresh_handle));
 
     let mut current_presence_state: Option<PresenceState> = None;
-    let mut discord_client = connect_discord_and_set_default(&mut current_presence_state, &presence_config);
+    let mut last_presence_update = Instant::now();
+    let mut discord_client = connect_discord_and_set_default(
+        &mut current_presence_state,
+        &presence_config,
+        &mut last_presence_update,
+    );
     let mut last_discord_connect_attempt = Instant::now();
 
     let mut last_song_id = -1;
@@ -581,6 +599,7 @@ fn main_thread() {
             &mut last_discord_connect_attempt,
             &mut current_presence_state,
             &presence_config,
+            &mut last_presence_update,
         );
 
         if debug_logging_enabled() {
@@ -611,6 +630,7 @@ fn main_thread() {
                     &songs_by_id,
                     &presence_config,
                     &mut last_discord_connect_attempt,
+                    &mut last_presence_update,
                 );
             }
             thread::sleep(Duration::from_secs(1));
@@ -629,6 +649,7 @@ fn main_thread() {
             &songs_by_id,
             &presence_config,
             &mut last_discord_connect_attempt,
+            &mut last_presence_update,
         );
 
         was_playing = is_playing;
