@@ -1,3 +1,5 @@
+use crate::memory;
+use crate::types::HookInstallStatus;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -9,29 +11,25 @@ use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 
 const DEBUG_ENV_VAR_NAME: &str = "CHUNIRICHPRESENCE_DEBUG";
 const LOG_FILE_NAME: &str = "chunirichpresence.log";
-const CRASH_LOG_FILE_NAME: &str = "chunirichpresence_crash.log";
 
 static LOG_FILE: OnceLock<Mutex<Option<fs::File>>> = OnceLock::new();
 static DLL_MODULE: AtomicIsize = AtomicIsize::new(0);
 static GENERAL_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
-static CRASH_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static DEBUG_LOGGING_ENABLED: OnceLock<bool> = OnceLock::new();
 
 pub fn set_dll_module(module: HMODULE) {
     DLL_MODULE.store(module, Ordering::Relaxed);
 }
 
-fn parse_debug_env(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
 pub fn debug_logging_enabled() -> bool {
     *DEBUG_LOGGING_ENABLED.get_or_init(|| {
         std::env::var(DEBUG_ENV_VAR_NAME)
-            .map(|value| parse_debug_env(&value))
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false)
     })
 }
@@ -67,13 +65,9 @@ unsafe fn module_path(module: HMODULE) -> Option<PathBuf> {
     }
 }
 
-unsafe fn module_base_dir(module: HMODULE) -> Option<PathBuf> {
-    module_path(module).and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
-}
-
 fn dll_base_dir() -> Option<PathBuf> {
     let module = dll_module_handle()?;
-    unsafe { module_base_dir(module) }
+    unsafe { module_path(module).and_then(|path| path.parent().map(|parent| parent.to_path_buf())) }
 }
 
 fn process_base_dir() -> Option<PathBuf> {
@@ -94,13 +88,6 @@ pub fn log_file_path() -> PathBuf {
         .get()
         .cloned()
         .unwrap_or_else(|| runtime_base_dir().join(LOG_FILE_NAME))
-}
-
-pub fn crash_log_path() -> PathBuf {
-    CRASH_LOG_PATH
-        .get()
-        .cloned()
-        .unwrap_or_else(|| runtime_base_dir().join(CRASH_LOG_FILE_NAME))
 }
 
 fn timestamp_string() -> String {
@@ -165,33 +152,22 @@ fn open_append_file_with_fallback(
     None
 }
 
-fn open_general_log_file() -> Option<fs::File> {
-    open_append_file_with_fallback(LOG_FILE_NAME, &GENERAL_LOG_PATH)
-}
-
-fn open_crash_log_file() -> Option<fs::File> {
-    open_append_file_with_fallback(CRASH_LOG_FILE_NAME, &CRASH_LOG_PATH)
-}
-
 fn append_general_log_line(line: &str) {
-    let log_file = LOG_FILE.get_or_init(|| Mutex::new(open_general_log_file()));
+    let log_file = LOG_FILE.get_or_init(|| {
+        Mutex::new(open_append_file_with_fallback(
+            LOG_FILE_NAME,
+            &GENERAL_LOG_PATH,
+        ))
+    });
     let Ok(mut file_guard) = log_file.lock() else {
         return;
     };
 
     if file_guard.is_none() {
-        *file_guard = open_general_log_file();
+        *file_guard = open_append_file_with_fallback(LOG_FILE_NAME, &GENERAL_LOG_PATH);
     }
 
     if let Some(file) = file_guard.as_mut() {
-        let _ = writeln!(file, "{}", line);
-        let _ = file.flush();
-        let _ = file.sync_data();
-    }
-}
-
-fn append_crash_log_line(line: &str) {
-    if let Some(mut file) = open_crash_log_file() {
         let _ = writeln!(file, "{}", line);
         let _ = file.flush();
         let _ = file.sync_data();
@@ -207,11 +183,96 @@ pub fn log_message(message: String) {
     append_general_log_line(&line);
 }
 
-pub fn write_crash_log(message: String) {
-    if !debug_logging_enabled() {
-        return;
-    }
+fn format_addr(addr: usize) -> String {
+    format!("0x{addr:08X}")
+}
 
-    let line = format!("[{}][ChuniRichPresence] {}", timestamp_string(), message);
-    append_crash_log_line(&line);
+fn format_optional_addr(addr: Option<usize>) -> String {
+    addr.map(format_addr).unwrap_or_else(|| "none".to_string())
+}
+
+pub fn log_resolved_game_module() {
+    let Some(module) = memory::resolved_game_module() else {
+        log_message("Failed to resolve game module handle".to_string());
+        return;
+    };
+
+    if let Some(path) = module.path {
+        log_message(format!("Resolved game module: {}", path.display()));
+    }
+    log_message(format!(
+        "Resolved game module base: {}",
+        format_addr(module.base_addr)
+    ));
+}
+
+pub fn log_hook_install_results(results: &[HookInstallStatus]) {
+    for result in results {
+        match &result.error {
+            Some(error) => {
+                log_message(format!("Failed to install {} hook: {}", result.name, error))
+            }
+            None => log_message(format!(
+                "Installed {} hook at {}",
+                result.name,
+                format_optional_addr(result.target_addr)
+            )),
+        }
+    }
+}
+
+pub fn log_memory_snapshot() {
+    let snapshot = memory::memory_snapshot();
+    log_message(format!(
+        "Memory snapshot: is_playing={:?}, song_id={:?}, difficulty={:?}",
+        snapshot.is_playing, snapshot.song_id, snapshot.difficulty
+    ));
+}
+
+pub fn log_memory_probe_status() {
+    let status = memory::memory_probe_status();
+
+    let Some(module) = status.module else {
+        log_message("Memory probe: failed to resolve game module handle".to_string());
+        return;
+    };
+
+    if let Some(path) = module.path {
+        log_message(format!("Memory probe: game module path {}", path.display()));
+    }
+    log_message(format!(
+        "Memory probe: game module base {}",
+        format_addr(module.base_addr)
+    ));
+    log_message(format!(
+        "Memory probe: song-id hook installed={} target={} cached={:?}",
+        status.song_id.installed,
+        format_optional_addr(status.song_id.target_addr),
+        status.song_id.cached_value
+    ));
+    log_message(format!(
+        "Memory probe: difficulty hook installed={} target={} cached={:?}",
+        status.difficulty.installed,
+        format_optional_addr(status.difficulty.target_addr),
+        status.difficulty.cached_value
+    ));
+    log_message(format!(
+        "Memory probe: play-state hooks enter_installed={} enter_target={} exit_installed={} exit_target={} cached={:?}",
+        status.play_state.enter_installed,
+        format_optional_addr(status.play_state.enter_target_addr),
+        status.play_state.exit_installed,
+        format_optional_addr(status.play_state.exit_target_addr),
+        status.play_state.cached_value
+    ));
+}
+
+pub fn log_stopped_playing() {
+    log_message("Stopped playing, back to song select".to_string());
+}
+
+pub fn log_started_playing(current_song_id: Option<i32>) {
+    match current_song_id {
+        Some(song_id) => log_message(format!("Started playing, Song ID: {}", song_id)),
+        None => log_message("Started playing, Song ID unavailable".to_string()),
+    }
 }
