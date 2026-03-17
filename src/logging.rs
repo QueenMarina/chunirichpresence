@@ -9,10 +9,12 @@ use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 
 const DEBUG_ENV_VAR_NAME: &str = "CHUNIRICHPRESENCE_DEBUG";
 const LOG_FILE_NAME: &str = "chunirichpresence.log";
+const CRASH_LOG_FILE_NAME: &str = "chunirichpresence_crash.log";
 
 static LOG_FILE: OnceLock<Mutex<Option<fs::File>>> = OnceLock::new();
 static DLL_MODULE: AtomicIsize = AtomicIsize::new(0);
 static GENERAL_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+static CRASH_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static DEBUG_LOGGING_ENABLED: OnceLock<bool> = OnceLock::new();
 
 pub fn set_dll_module(module: HMODULE) {
@@ -94,6 +96,13 @@ pub fn log_file_path() -> PathBuf {
         .unwrap_or_else(|| runtime_base_dir().join(LOG_FILE_NAME))
 }
 
+pub fn crash_log_path() -> PathBuf {
+    CRASH_LOG_PATH
+        .get()
+        .cloned()
+        .unwrap_or_else(|| runtime_base_dir().join(CRASH_LOG_FILE_NAME))
+}
+
 fn timestamp_string() -> String {
     unsafe {
         let mut local_time = std::mem::zeroed::<SYSTEMTIME>();
@@ -160,6 +169,10 @@ fn open_general_log_file() -> Option<fs::File> {
     open_append_file_with_fallback(LOG_FILE_NAME, &GENERAL_LOG_PATH)
 }
 
+fn open_crash_log_file() -> Option<fs::File> {
+    open_append_file_with_fallback(CRASH_LOG_FILE_NAME, &CRASH_LOG_PATH)
+}
+
 fn append_general_log_line(line: &str) {
     let log_file = LOG_FILE.get_or_init(|| Mutex::new(open_general_log_file()));
     let Ok(mut file_guard) = log_file.lock() else {
@@ -177,6 +190,14 @@ fn append_general_log_line(line: &str) {
     }
 }
 
+fn append_crash_log_line(line: &str) {
+    if let Some(mut file) = open_crash_log_file() {
+        let _ = writeln!(file, "{}", line);
+        let _ = file.flush();
+        let _ = file.sync_data();
+    }
+}
+
 pub fn log_message(message: String) {
     if !debug_logging_enabled() {
         return;
@@ -184,4 +205,13 @@ pub fn log_message(message: String) {
 
     let line = format!("[{}][ChuniRichPresence] {}", timestamp_string(), message);
     append_general_log_line(&line);
+}
+
+pub fn write_crash_log(message: String) {
+    if !debug_logging_enabled() {
+        return;
+    }
+
+    let line = format!("[{}][ChuniRichPresence] {}", timestamp_string(), message);
+    append_crash_log_line(&line);
 }

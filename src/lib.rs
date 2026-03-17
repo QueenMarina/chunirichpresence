@@ -4,20 +4,26 @@ mod types;
 
 use configparser::ini::Ini;
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
+use std::backtrace::Backtrace;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs;
+use std::panic;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Once, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use logging::{debug_logging_enabled, log_file_path, runtime_base_dir, set_dll_module};
+use logging::{
+    crash_log_path, debug_logging_enabled, log_file_path, runtime_base_dir, set_dll_module,
+    write_crash_log,
+};
 use memory::{
-    log_memory_probe_status, log_memory_snapshot, log_resolved_game_module,
+    install_runtime_hooks, log_memory_probe_status, log_memory_snapshot, log_resolved_game_module,
     read_presence_state_from_memory,
 };
 use types::{PresenceState, RichPresenceConfig, Song};
 use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HMODULE, TRUE};
+use windows_sys::Win32::System::Diagnostics::Debug::{SetUnhandledExceptionFilter, EXCEPTION_POINTERS};
 use windows_sys::Win32::System::LibraryLoader::DisableThreadLibraryCalls;
 use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows_sys::Win32::System::Threading::CreateThread;
@@ -38,10 +44,60 @@ const SONGS_FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
 const SONGS_CACHE_FILE_NAME: &str = "chunithm_songs_cache.json";
 const SEGATOOLS_INI_FILE_NAME: &str = "segatools.ini";
 
+static DIAGNOSTICS_HOOKS: Once = Once::new();
+
 macro_rules! log {
     ($($arg:tt)*) => {{
         crate::logging::log_message(format!($($arg)*));
     }};
+}
+
+unsafe extern "system" fn top_level_exception_filter(exception_info: *const EXCEPTION_POINTERS) -> i32 {
+    let Some(exception_info) = exception_info.as_ref() else {
+        write_crash_log("Unhandled exception with null exception info".to_string());
+        return 0;
+    };
+
+    let record = exception_info.ExceptionRecord;
+    if record.is_null() {
+        write_crash_log("Unhandled exception with null exception record".to_string());
+        return 0;
+    }
+
+    let record = &*record;
+    write_crash_log(format!(
+        "Unhandled exception code=0x{:08X} address={:?}",
+        record.ExceptionCode,
+        record.ExceptionAddress
+    ));
+    0
+}
+
+fn install_debug_diagnostics() {
+    DIAGNOSTICS_HOOKS.call_once(|| {
+        panic::set_hook(Box::new(|panic_info| {
+            let location = panic_info
+                .location()
+                .map(|location| format!("{}:{}", location.file(), location.line()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            let payload = if let Some(message) = panic_info.payload().downcast_ref::<&str>() {
+                (*message).to_string()
+            } else if let Some(message) = panic_info.payload().downcast_ref::<String>() {
+                message.clone()
+            } else {
+                "non-string panic payload".to_string()
+            };
+            let backtrace = Backtrace::force_capture();
+            write_crash_log(format!(
+                "Panic at {}: {}\nBacktrace:\n{}",
+                location, payload, backtrace
+            ));
+        }));
+
+        unsafe {
+            SetUnhandledExceptionFilter(Some(top_level_exception_filter));
+        }
+    });
 }
 
 impl Default for RichPresenceConfig {
@@ -492,7 +548,10 @@ fn main_thread() {
     log!("Injected successfully into Chunithm!");
     log!("Runtime base directory: {}", runtime_base_dir().display());
     log!("General log file: {}", log_file_path().display());
+    log!("Crash log file: {}", crash_log_path().display());
+    install_debug_diagnostics();
     log_resolved_game_module();
+    install_runtime_hooks();
     let presence_config = load_presence_config();
 
     let songs_by_id = Arc::new(RwLock::new(match load_songs_from_cache() {
@@ -511,6 +570,7 @@ fn main_thread() {
     let mut last_discord_connect_attempt = Instant::now();
 
     let mut last_song_id = -1;
+    let mut latched_song_id = None;
     let mut latched_difficulty = None;
     let mut was_playing = false;
     let mut memory_read_available = true;
@@ -534,6 +594,7 @@ fn main_thread() {
                     &songs_by_id,
                     was_playing,
                     &mut last_song_id,
+                    &mut latched_song_id,
                     &mut latched_difficulty,
                 )
             })
@@ -612,12 +673,3 @@ pub extern "system" fn DllMain(
     }
 }
 
-// ============================================================================
-// Magic stub to fix 32-bit MinGW cross-compilation linker errors
-// Since we use panic="abort", this is never actually called.
-// I am not familiar enough with rust to know exactly what this does, but it fixed my issues when compiling this as a 32bit dll
-#[cfg(all(target_os = "windows", target_env = "gnu", target_pointer_width = "32"))]
-#[no_mangle]
-pub extern "C" fn _Unwind_Resume() -> ! {
-    std::process::abort();
-}
