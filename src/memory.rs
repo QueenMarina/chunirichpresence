@@ -33,28 +33,54 @@ const PLAY_STATE_VALUE_SONG_SELECT: i32 = 3;
 const PE_LFANEW_OFFSET: usize = 0x3C;
 const PE_SIZE_OF_IMAGE_OFFSET: usize = 0x50;
 
-static SONG_ID_HOOK_ONCE: Once = Once::new();
-static SONG_ID_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
-static SONG_ID_HOOK_TARGET: AtomicUsize = AtomicUsize::new(0);
-static SONG_ID_HOOK_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
-static SONG_ID_HOOK_STUB: AtomicUsize = AtomicUsize::new(0);
+struct HookState {
+    once: Once,
+    installed: AtomicBool,
+    target: AtomicUsize,
+    trampoline: AtomicUsize,
+    stub: AtomicUsize,
+}
+
+impl HookState {
+    const fn new() -> Self {
+        Self {
+            once: Once::new(),
+            installed: AtomicBool::new(false),
+            target: AtomicUsize::new(0),
+            trampoline: AtomicUsize::new(0),
+            stub: AtomicUsize::new(0),
+        }
+    }
+
+    fn store_install(&self, install: InstalledHook) {
+        self.installed.store(true, Ordering::Relaxed);
+        self.target.store(install.target_addr, Ordering::Relaxed);
+        self.trampoline
+            .store(install.trampoline_addr, Ordering::Relaxed);
+        self.stub.store(install.stub_addr, Ordering::Relaxed);
+    }
+}
+
+struct HookConfig {
+    name: &'static str,
+    overwrite_len: usize,
+    fallback_rva: usize,
+    pattern: &'static [Option<u8>],
+    callback: unsafe extern "system" fn(*const PushadRegisters),
+}
+
+struct InstalledHook {
+    target_addr: usize,
+    trampoline_addr: usize,
+    stub_addr: usize,
+}
+
+static SONG_ID_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_SONG_ID: AtomicI32 = AtomicI32::new(SONG_ID_UNSET);
-static DIFFICULTY_HOOK_ONCE: Once = Once::new();
-static DIFFICULTY_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
-static DIFFICULTY_HOOK_TARGET: AtomicUsize = AtomicUsize::new(0);
-static DIFFICULTY_HOOK_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
-static DIFFICULTY_HOOK_STUB: AtomicUsize = AtomicUsize::new(0);
+static DIFFICULTY_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_DIFFICULTY: AtomicI32 = AtomicI32::new(DIFFICULTY_UNSET);
-static PLAY_STATE_ENTER_HOOK_ONCE: Once = Once::new();
-static PLAY_STATE_ENTER_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
-static PLAY_STATE_ENTER_HOOK_TARGET: AtomicUsize = AtomicUsize::new(0);
-static PLAY_STATE_ENTER_HOOK_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
-static PLAY_STATE_ENTER_HOOK_STUB: AtomicUsize = AtomicUsize::new(0);
-static PLAY_STATE_EXIT_HOOK_ONCE: Once = Once::new();
-static PLAY_STATE_EXIT_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
-static PLAY_STATE_EXIT_HOOK_TARGET: AtomicUsize = AtomicUsize::new(0);
-static PLAY_STATE_EXIT_HOOK_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
-static PLAY_STATE_EXIT_HOOK_STUB: AtomicUsize = AtomicUsize::new(0);
+static PLAY_STATE_ENTER_HOOK_STATE: HookState = HookState::new();
+static PLAY_STATE_EXIT_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_PLAY_STATE: AtomicI32 = AtomicI32::new(PLAY_STATE_UNSET);
 
 const SONG_ID_HOOK_PATTERN: &[Option<u8>] = &[
@@ -132,6 +158,38 @@ const PLAY_STATE_EXIT_HOOK_PATTERN: &[Option<u8>] = &[
     Some(0x5B),
 ];
 
+const SONG_ID_HOOK: HookConfig = HookConfig {
+    name: "song ID",
+    overwrite_len: SONG_ID_HOOK_OVERWRITE_LEN,
+    fallback_rva: SONG_ID_HOOK_FALLBACK_RVA,
+    pattern: SONG_ID_HOOK_PATTERN,
+    callback: song_id_hook_callback,
+};
+
+const DIFFICULTY_HOOK: HookConfig = HookConfig {
+    name: "difficulty",
+    overwrite_len: DIFFICULTY_HOOK_OVERWRITE_LEN,
+    fallback_rva: DIFFICULTY_HOOK_FALLBACK_RVA,
+    pattern: DIFFICULTY_HOOK_PATTERN,
+    callback: difficulty_hook_callback,
+};
+
+const PLAY_STATE_ENTER_HOOK: HookConfig = HookConfig {
+    name: "play-state enter",
+    overwrite_len: PLAY_STATE_ENTER_HOOK_OVERWRITE_LEN,
+    fallback_rva: PLAY_STATE_ENTER_HOOK_FALLBACK_RVA,
+    pattern: PLAY_STATE_ENTER_HOOK_PATTERN,
+    callback: play_state_enter_hook_callback,
+};
+
+const PLAY_STATE_EXIT_HOOK: HookConfig = HookConfig {
+    name: "play-state exit",
+    overwrite_len: PLAY_STATE_EXIT_HOOK_OVERWRITE_LEN,
+    fallback_rva: PLAY_STATE_EXIT_HOOK_FALLBACK_RVA,
+    pattern: PLAY_STATE_EXIT_HOOK_PATTERN,
+    callback: play_state_exit_hook_callback,
+};
+
 #[repr(C)]
 struct PushadRegisters {
     edi: u32,
@@ -156,9 +214,7 @@ pub unsafe fn read_presence_state_from_memory(
         if was_playing {
             log_message("Stopped playing, back to song select".to_string());
         }
-        *last_song_id = -1;
-        *latched_song_id = None;
-        *latched_difficulty = None;
+        reset_play_latches(last_song_id, latched_song_id, latched_difficulty);
         return Some((false, PresenceState::Default));
     }
 
@@ -167,16 +223,12 @@ pub unsafe fn read_presence_state_from_memory(
 
     if !was_playing {
         let Some(song_id) = live_song_id.filter(|song_id| *song_id != -1) else {
-            *last_song_id = -1;
-            *latched_song_id = None;
-            *latched_difficulty = None;
+            reset_play_latches(last_song_id, latched_song_id, latched_difficulty);
             return Some((false, PresenceState::Default));
         };
 
         let Some(difficulty) = current_difficulty else {
-            *last_song_id = -1;
-            *latched_song_id = None;
-            *latched_difficulty = None;
+            reset_play_latches(last_song_id, latched_song_id, latched_difficulty);
             return Some((false, PresenceState::Default));
         };
 
@@ -199,82 +251,44 @@ pub unsafe fn read_presence_state_from_memory(
     Some((true, desired_presence_state))
 }
 
+fn reset_play_latches(
+    last_song_id: &mut i32,
+    latched_song_id: &mut Option<i32>,
+    latched_difficulty: &mut Option<i32>,
+) {
+    *last_song_id = -1;
+    *latched_song_id = None;
+    *latched_difficulty = None;
+}
+
+fn install_runtime_hook(state: &HookState, config: &HookConfig) {
+    state.once.call_once(|| unsafe {
+        match install_hook_once(config) {
+            Ok(install) => {
+                let target_addr = install.target_addr;
+                state.store_install(install);
+                log_message(format!(
+                    "Installed {} hook at {}",
+                    config.name,
+                    format_addr(target_addr)
+                ));
+            }
+            Err(error) => {
+                log_message(format!(
+                    "Failed to install {} hook: {}",
+                    config.name,
+                    error
+                ));
+            }
+        }
+    });
+}
+
 pub fn install_runtime_hooks() {
-    SONG_ID_HOOK_ONCE.call_once(|| unsafe {
-        match install_song_id_hook_once() {
-            Ok(target_addr) => {
-                SONG_ID_HOOK_INSTALLED.store(true, Ordering::Relaxed);
-                SONG_ID_HOOK_TARGET.store(target_addr, Ordering::Relaxed);
-                log_message(format!(
-                    "Installed song ID hook at {}",
-                    format_addr(target_addr)
-                ));
-            }
-            Err(error) => {
-                log_message(format!(
-                    "Failed to install song ID hook: {}",
-                    error
-                ));
-            }
-        }
-    });
-
-    DIFFICULTY_HOOK_ONCE.call_once(|| unsafe {
-        match install_difficulty_hook_once() {
-            Ok(target_addr) => {
-                DIFFICULTY_HOOK_INSTALLED.store(true, Ordering::Relaxed);
-                DIFFICULTY_HOOK_TARGET.store(target_addr, Ordering::Relaxed);
-                log_message(format!(
-                    "Installed difficulty hook at {}",
-                    format_addr(target_addr)
-                ));
-            }
-            Err(error) => {
-                log_message(format!(
-                    "Failed to install difficulty hook: {}",
-                    error
-                ));
-            }
-        }
-    });
-
-    PLAY_STATE_ENTER_HOOK_ONCE.call_once(|| unsafe {
-        match install_play_state_enter_hook_once() {
-            Ok(target_addr) => {
-                PLAY_STATE_ENTER_HOOK_INSTALLED.store(true, Ordering::Relaxed);
-                PLAY_STATE_ENTER_HOOK_TARGET.store(target_addr, Ordering::Relaxed);
-                log_message(format!(
-                    "Installed play-state enter hook at {}",
-                    format_addr(target_addr)
-                ));
-            }
-            Err(error) => {
-                log_message(format!(
-                    "Failed to install play-state enter hook: {}",
-                    error
-                ));
-            }
-        }
-    });
-
-    PLAY_STATE_EXIT_HOOK_ONCE.call_once(|| unsafe {
-        match install_play_state_exit_hook_once() {
-            Ok(target_addr) => {
-                PLAY_STATE_EXIT_HOOK_INSTALLED.store(true, Ordering::Relaxed);
-                PLAY_STATE_EXIT_HOOK_TARGET.store(target_addr, Ordering::Relaxed);
-                log_message(format!(
-                    "Installed play-state exit hook at {}",
-                    format_addr(target_addr)
-                ));
-            }
-            Err(error) => {
-                log_message(format!(
-                    "Failed to install play-state exit hook: {}",
-                    error
-                ));
-            }
-        }
-    });
+    install_runtime_hook(&SONG_ID_HOOK_STATE, &SONG_ID_HOOK);
+    install_runtime_hook(&DIFFICULTY_HOOK_STATE, &DIFFICULTY_HOOK);
+    install_runtime_hook(&PLAY_STATE_ENTER_HOOK_STATE, &PLAY_STATE_ENTER_HOOK);
+    install_runtime_hook(&PLAY_STATE_EXIT_HOOK_STATE, &PLAY_STATE_EXIT_HOOK);
 }
 
 pub fn log_memory_probe_status() {
@@ -291,22 +305,22 @@ pub fn log_memory_probe_status() {
         log_message(format!("Memory probe: game module base {}", format_addr(module_base)));
         log_message(format!(
             "Memory probe: song-id hook installed={} target={} cached={:?}",
-            SONG_ID_HOOK_INSTALLED.load(Ordering::Relaxed),
-            format_optional_addr(SONG_ID_HOOK_TARGET.load(Ordering::Relaxed)),
+            SONG_ID_HOOK_STATE.installed.load(Ordering::Relaxed),
+            format_optional_addr(SONG_ID_HOOK_STATE.target.load(Ordering::Relaxed)),
             current_hooked_song_id()
         ));
         log_message(format!(
             "Memory probe: difficulty hook installed={} target={} cached={:?}",
-            DIFFICULTY_HOOK_INSTALLED.load(Ordering::Relaxed),
-            format_optional_addr(DIFFICULTY_HOOK_TARGET.load(Ordering::Relaxed)),
+            DIFFICULTY_HOOK_STATE.installed.load(Ordering::Relaxed),
+            format_optional_addr(DIFFICULTY_HOOK_STATE.target.load(Ordering::Relaxed)),
             current_hooked_difficulty()
         ));
         log_message(format!(
             "Memory probe: play-state hooks enter_installed={} enter_target={} exit_installed={} exit_target={} cached={:?}",
-            PLAY_STATE_ENTER_HOOK_INSTALLED.load(Ordering::Relaxed),
-            format_optional_addr(PLAY_STATE_ENTER_HOOK_TARGET.load(Ordering::Relaxed)),
-            PLAY_STATE_EXIT_HOOK_INSTALLED.load(Ordering::Relaxed),
-            format_optional_addr(PLAY_STATE_EXIT_HOOK_TARGET.load(Ordering::Relaxed)),
+            PLAY_STATE_ENTER_HOOK_STATE.installed.load(Ordering::Relaxed),
+            format_optional_addr(PLAY_STATE_ENTER_HOOK_STATE.target.load(Ordering::Relaxed)),
+            PLAY_STATE_EXIT_HOOK_STATE.installed.load(Ordering::Relaxed),
+            format_optional_addr(PLAY_STATE_EXIT_HOOK_STATE.target.load(Ordering::Relaxed)),
             current_hooked_play_state()
         ));
     }
@@ -436,18 +450,19 @@ fn format_optional_addr(addr: usize) -> String {
     }
 }
 
-fn current_hooked_song_id() -> Option<i32> {
-    match LAST_HOOKED_SONG_ID.load(Ordering::Relaxed) {
-        SONG_ID_UNSET => None,
+fn current_cached_i32(cache: &AtomicI32, unset: i32) -> Option<i32> {
+    match cache.load(Ordering::Relaxed) {
+        value if value == unset => None,
         value => Some(value),
     }
 }
 
+fn current_hooked_song_id() -> Option<i32> {
+    current_cached_i32(&LAST_HOOKED_SONG_ID, SONG_ID_UNSET)
+}
+
 fn current_hooked_difficulty() -> Option<i32> {
-    match LAST_HOOKED_DIFFICULTY.load(Ordering::Relaxed) {
-        DIFFICULTY_UNSET => None,
-        value => Some(value),
-    }
+    current_cached_i32(&LAST_HOOKED_DIFFICULTY, DIFFICULTY_UNSET)
 }
 
 fn current_hooked_play_state() -> Option<bool> {
@@ -510,140 +525,44 @@ unsafe fn capture_play_state_from_ebx(registers: *const PushadRegisters) {
     }
 }
 
-unsafe fn install_song_id_hook_once() -> Result<usize, String> {
+unsafe fn install_hook_once(config: &HookConfig) -> Result<InstalledHook, String> {
     let module_handle = get_module_handle().ok_or_else(|| "game module handle not found".to_string())?;
     let module_base = module_handle as usize;
-    let target_addr = verify_song_id_hook_fallback_target(module_base)
-        .or_else(|| find_song_id_hook_target(module_base))
-        .ok_or_else(|| "song ID hook signature not found".to_string())?;
+    let target_addr = resolve_hook_target(module_base, config)
+        .ok_or_else(|| format!("{} hook signature not found", config.name))?;
+    let trampoline_addr = create_trampoline(target_addr, config.overwrite_len)?;
+    let stub_addr = create_hook_stub(trampoline_addr, config.callback)?;
+    patch_hook_target(target_addr, config.overwrite_len, stub_addr)?;
 
-    let trampoline_addr = create_song_id_trampoline(target_addr)?;
-    let stub_addr = create_song_id_hook_stub(trampoline_addr)?;
-    patch_song_id_hook_target(target_addr, stub_addr)?;
-
-    SONG_ID_HOOK_TRAMPOLINE.store(trampoline_addr, Ordering::Relaxed);
-    SONG_ID_HOOK_STUB.store(stub_addr, Ordering::Relaxed);
-
-    Ok(target_addr)
+    Ok(InstalledHook {
+        target_addr,
+        trampoline_addr,
+        stub_addr,
+    })
 }
 
-unsafe fn install_difficulty_hook_once() -> Result<usize, String> {
-    let module_handle = get_module_handle().ok_or_else(|| "game module handle not found".to_string())?;
-    let module_base = module_handle as usize;
-    let target_addr = verify_difficulty_hook_fallback_target(module_base)
-        .or_else(|| find_difficulty_hook_target(module_base))
-        .ok_or_else(|| "difficulty hook signature not found".to_string())?;
-
-    let trampoline_addr = create_trampoline(target_addr, DIFFICULTY_HOOK_OVERWRITE_LEN)?;
-    let stub_addr = create_hook_stub(trampoline_addr, difficulty_hook_callback)?;
-    patch_hook_target(target_addr, DIFFICULTY_HOOK_OVERWRITE_LEN, stub_addr)?;
-
-    DIFFICULTY_HOOK_TRAMPOLINE.store(trampoline_addr, Ordering::Relaxed);
-    DIFFICULTY_HOOK_STUB.store(stub_addr, Ordering::Relaxed);
-
-    Ok(target_addr)
+unsafe fn resolve_hook_target(module_base: usize, config: &HookConfig) -> Option<usize> {
+    verify_hook_fallback_target(module_base, config.fallback_rva, config.pattern)
+        .or_else(|| find_hook_target(module_base, config.pattern))
 }
 
-unsafe fn install_play_state_enter_hook_once() -> Result<usize, String> {
-    let module_handle = get_module_handle().ok_or_else(|| "game module handle not found".to_string())?;
-    let module_base = module_handle as usize;
-    let target_addr = verify_play_state_enter_hook_fallback_target(module_base)
-        .or_else(|| find_play_state_enter_hook_target(module_base))
-        .ok_or_else(|| "play-state enter hook signature not found".to_string())?;
-
-    let trampoline_addr = create_trampoline(target_addr, PLAY_STATE_ENTER_HOOK_OVERWRITE_LEN)?;
-    let stub_addr = create_hook_stub(trampoline_addr, play_state_enter_hook_callback)?;
-    patch_hook_target(target_addr, PLAY_STATE_ENTER_HOOK_OVERWRITE_LEN, stub_addr)?;
-
-    PLAY_STATE_ENTER_HOOK_TRAMPOLINE.store(trampoline_addr, Ordering::Relaxed);
-    PLAY_STATE_ENTER_HOOK_STUB.store(stub_addr, Ordering::Relaxed);
-
-    Ok(target_addr)
+unsafe fn find_hook_target(module_base: usize, pattern: &[Option<u8>]) -> Option<usize> {
+    find_pattern(module_base, module_size(module_base)?, pattern)
 }
 
-unsafe fn install_play_state_exit_hook_once() -> Result<usize, String> {
-    let module_handle = get_module_handle().ok_or_else(|| "game module handle not found".to_string())?;
-    let module_base = module_handle as usize;
-    let target_addr = verify_play_state_exit_hook_fallback_target(module_base)
-        .or_else(|| find_play_state_exit_hook_target(module_base))
-        .ok_or_else(|| "play-state exit hook signature not found".to_string())?;
-
-    let trampoline_addr = create_trampoline(target_addr, PLAY_STATE_EXIT_HOOK_OVERWRITE_LEN)?;
-    let stub_addr = create_hook_stub(trampoline_addr, play_state_exit_hook_callback)?;
-    patch_hook_target(target_addr, PLAY_STATE_EXIT_HOOK_OVERWRITE_LEN, stub_addr)?;
-
-    PLAY_STATE_EXIT_HOOK_TRAMPOLINE.store(trampoline_addr, Ordering::Relaxed);
-    PLAY_STATE_EXIT_HOOK_STUB.store(stub_addr, Ordering::Relaxed);
-
-    Ok(target_addr)
+unsafe fn verify_hook_fallback_target(
+    module_base: usize,
+    fallback_rva: usize,
+    pattern: &[Option<u8>],
+) -> Option<usize> {
+    let target_addr = add_offset(module_base, fallback_rva)?;
+    pattern_matches(target_addr, pattern).then_some(target_addr)
 }
 
-unsafe fn find_song_id_hook_target(module_base: usize) -> Option<usize> {
+unsafe fn module_size(module_base: usize) -> Option<usize> {
     let pe_header_offset = read_u32(add_offset(module_base, PE_LFANEW_OFFSET)?)? as usize;
     let pe_header = add_offset(module_base, pe_header_offset)?;
-    let size_of_image = read_u32(add_offset(pe_header, PE_SIZE_OF_IMAGE_OFFSET)?)? as usize;
-    find_pattern(module_base, size_of_image, SONG_ID_HOOK_PATTERN)
-}
-
-unsafe fn verify_song_id_hook_fallback_target(module_base: usize) -> Option<usize> {
-    let target_addr = add_offset(module_base, SONG_ID_HOOK_FALLBACK_RVA)?;
-    if pattern_matches(target_addr, SONG_ID_HOOK_PATTERN) {
-        Some(target_addr)
-    } else {
-        None
-    }
-}
-
-unsafe fn find_difficulty_hook_target(module_base: usize) -> Option<usize> {
-    let pe_header_offset = read_u32(add_offset(module_base, PE_LFANEW_OFFSET)?)? as usize;
-    let pe_header = add_offset(module_base, pe_header_offset)?;
-    let size_of_image = read_u32(add_offset(pe_header, PE_SIZE_OF_IMAGE_OFFSET)?)? as usize;
-    find_pattern(module_base, size_of_image, DIFFICULTY_HOOK_PATTERN)
-}
-
-unsafe fn verify_difficulty_hook_fallback_target(module_base: usize) -> Option<usize> {
-    let target_addr = add_offset(module_base, DIFFICULTY_HOOK_FALLBACK_RVA)?;
-    if pattern_matches(target_addr, DIFFICULTY_HOOK_PATTERN) {
-        Some(target_addr)
-    } else {
-        None
-    }
-}
-
-unsafe fn find_play_state_enter_hook_target(module_base: usize) -> Option<usize> {
-    let pe_header_offset = read_u32(add_offset(module_base, PE_LFANEW_OFFSET)?)? as usize;
-    let pe_header = add_offset(module_base, pe_header_offset)?;
-    let size_of_image = read_u32(add_offset(pe_header, PE_SIZE_OF_IMAGE_OFFSET)?)? as usize;
-    find_pattern(module_base, size_of_image, PLAY_STATE_ENTER_HOOK_PATTERN)
-}
-
-unsafe fn verify_play_state_enter_hook_fallback_target(module_base: usize) -> Option<usize> {
-    let target_addr = add_offset(module_base, PLAY_STATE_ENTER_HOOK_FALLBACK_RVA)?;
-    if pattern_matches(target_addr, PLAY_STATE_ENTER_HOOK_PATTERN) {
-        Some(target_addr)
-    } else {
-        None
-    }
-}
-
-unsafe fn find_play_state_exit_hook_target(module_base: usize) -> Option<usize> {
-    let pe_header_offset = read_u32(add_offset(module_base, PE_LFANEW_OFFSET)?)? as usize;
-    let pe_header = add_offset(module_base, pe_header_offset)?;
-    let size_of_image = read_u32(add_offset(pe_header, PE_SIZE_OF_IMAGE_OFFSET)?)? as usize;
-    find_pattern(module_base, size_of_image, PLAY_STATE_EXIT_HOOK_PATTERN)
-}
-
-unsafe fn verify_play_state_exit_hook_fallback_target(module_base: usize) -> Option<usize> {
-    let target_addr = add_offset(module_base, PLAY_STATE_EXIT_HOOK_FALLBACK_RVA)?;
-    if pattern_matches(target_addr, PLAY_STATE_EXIT_HOOK_PATTERN) {
-        Some(target_addr)
-    } else {
-        None
-    }
-}
-
-unsafe fn create_song_id_trampoline(target_addr: usize) -> Result<usize, String> {
-    create_trampoline(target_addr, SONG_ID_HOOK_OVERWRITE_LEN)
+    read_u32(add_offset(pe_header, PE_SIZE_OF_IMAGE_OFFSET)?)?.try_into().ok()
 }
 
 unsafe fn create_trampoline(target_addr: usize, overwrite_len: usize) -> Result<usize, String> {
@@ -661,10 +580,6 @@ unsafe fn create_trampoline(target_addr: usize, overwrite_len: usize) -> Result<
     )?;
 
     Ok(trampoline_addr)
-}
-
-unsafe fn create_song_id_hook_stub(trampoline_addr: usize) -> Result<usize, String> {
-    create_hook_stub(trampoline_addr, song_id_hook_callback)
 }
 
 unsafe fn create_hook_stub(
@@ -702,10 +617,6 @@ unsafe fn create_hook_stub(
     ptr::write_unaligned(cursor as *mut i32, relative_jump_offset(jump_back_from, trampoline_addr)?);
 
     Ok(stub_addr)
-}
-
-unsafe fn patch_song_id_hook_target(target_addr: usize, stub_addr: usize) -> Result<(), String> {
-    patch_hook_target(target_addr, SONG_ID_HOOK_OVERWRITE_LEN, stub_addr)
 }
 
 unsafe fn patch_hook_target(target_addr: usize, overwrite_len: usize, stub_addr: usize) -> Result<(), String> {
