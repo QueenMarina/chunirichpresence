@@ -34,18 +34,13 @@ You do not need to create a Discord app ID, you can use the provided one, but th
 
 1. Install Rust using rustup:
    - https://rustup.rs
-2. Add the target for your build machine:
-   - Linux: `rustup target add i686-pc-windows-gnu`
-   - Windows: `rustup target add i686-pc-windows-msvc`
+2. Add the target:
+   - `rustup target add i686-pc-windows-msvc`
 3. Build:
-   - Linux / Wine:
-     `cargo build --target i686-pc-windows-gnu --release`
-   - Native Windows:
-     `cargo build --target i686-pc-windows-msvc --release`
+   - `cargo build --release --target i686-pc-windows-msvc`
 
 Build output:
 
-- `target/i686-pc-windows-gnu/release/chunirichpresence.dll`
 - `target/i686-pc-windows-msvc/release/chunirichpresence.dll`
 
 ## How to add
@@ -66,24 +61,14 @@ If your `launch.bat` already injects DLLs, append `chunirichpresence.dll` to tha
 
 Debug logs are only written when `CHUNIRICHPRESENCE_DEBUG` is enabled.
 
-- Windows `launch.bat` example:
+- `launch.bat` example:
   `set CHUNIRICHPRESENCE_DEBUG=1`
-- Linux shell example:
-  `export CHUNIRICHPRESENCE_DEBUG=1`
 
 When enabled, logs are written to `chunirichpresence.log` next to `chunirichpresence.dll`
 
-## How-to on Linux
-
-If you play Chunithm on Linux using wine, it will not work by default because wine has no way to connect to Discord Rich Presence.
-
-You can use a bridge and run it in the same wineprefix as the game https://github.com/EnderIce2/rpc-bridge
-
-This only works with the official version of Discord, Vesktop uses `arrpc` and it is not supported yet
-
 ## Testing
 
-This has only been tested in Chunithm XVERSE running under wine in Linux, using this [rpc bridge](https://github.com/EnderIce2/rpc-bridge) and the official Discord desktop app
+This has been tested with Chunithm XVERSE Final on Windows 10.
 
 ## Disclaimer
 
