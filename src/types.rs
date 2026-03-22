@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -6,9 +6,55 @@ use std::sync::{Once, OnceLock};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Song {
+    #[serde(deserialize_with = "deserialize_song_id")]
     pub id: String,
     pub title: String,
     pub artist: String,
+    #[serde(default)]
+    pub charts: Vec<SongChart>,
+}
+
+impl Song {
+    pub fn chart_level_for_difficulty(&self, difficulty_index: i32) -> Option<&str> {
+        let difficulty_code = match difficulty_index {
+            0 => "BAS",
+            1 => "ADV",
+            2 => "EXP",
+            3 => "MAS",
+            4 => "ULT",
+            _ => return None,
+        };
+
+        self.charts
+            .iter()
+            .find(|chart| chart.difficulty == difficulty_code)
+            .map(|chart| chart.level.as_str())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SongChart {
+    pub difficulty: String,
+    pub level: String,
+}
+
+fn deserialize_song_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SongIdValue {
+        String(String),
+        Integer(i64),
+        Unsigned(u64),
+    }
+
+    match SongIdValue::deserialize(deserializer)? {
+        SongIdValue::String(id) => Ok(id),
+        SongIdValue::Integer(id) => Ok(id.to_string()),
+        SongIdValue::Unsigned(id) => Ok(id.to_string()),
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -67,6 +67,14 @@ fn difficulty_label(difficulty: i32) -> &'static str {
     }
 }
 
+fn difficulty_state_label(song: Option<&Song>, difficulty: i32) -> String {
+    let label = difficulty_label(difficulty);
+    match song.and_then(|song| song.chart_level_for_difficulty(difficulty)) {
+        Some(level) => format!("{label} {level}"),
+        None => label.to_string(),
+    }
+}
+
 fn sanitize_ini_value(value: Option<String>) -> Option<String> {
     let value = value?;
     let trimmed = value.trim();
@@ -148,11 +156,12 @@ fn song_activity(
 ) -> activity::Activity<'static> {
     let image_url = format!("{}{id}.webp", SONG_JACKET_BASE_URL, id = song.id);
     let subtitle = format!("Playing {} - {}", song.title, song.artist);
+    let difficulty_state = difficulty_state_label(Some(song), difficulty);
 
     activity::Activity::new()
         .name(config.game_name.clone())
         .details(subtitle)
-        .state(difficulty_label(difficulty))
+        .state(difficulty_state)
         .assets(
             activity::Assets::new()
                 .large_image(image_url.clone())
@@ -164,10 +173,12 @@ fn unknown_song_activity(
     difficulty: i32,
     config: &RichPresenceConfig,
 ) -> activity::Activity<'static> {
+    let difficulty_state = difficulty_state_label(None, difficulty);
+
     activity::Activity::new()
         .name(config.game_name.clone())
         .details("Playing a song")
-        .state(difficulty_label(difficulty))
+        .state(difficulty_state)
         .assets(
             activity::Assets::new()
                 .large_image(config.logo_url.clone())
@@ -267,15 +278,16 @@ fn update_presence(
             unknown_song_activity(*difficulty, config),
         ),
         PresenceState::Song { id, difficulty } => match get_song_by_id(songs_by_id, *id) {
-            Some(song) => (
-                format!(
-                    "song {} - {} ({})",
-                    song.title,
-                    song.artist,
-                    difficulty_label(*difficulty)
-                ),
-                song_activity(&song, *difficulty, config),
-            ),
+            Some(song) => {
+                let difficulty_state = difficulty_state_label(Some(&song), *difficulty);
+                (
+                    format!(
+                        "song {} - {} ({})",
+                        song.title, song.artist, difficulty_state
+                    ),
+                    song_activity(&song, *difficulty, config),
+                )
+            }
             None => (
                 format!(
                     "song id {} missing from dataset ({})",

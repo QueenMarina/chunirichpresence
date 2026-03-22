@@ -9,7 +9,8 @@ use std::time::Duration;
 
 pub(crate) type SongsById = Arc<RwLock<HashMap<i32, Song>>>;
 
-const SONGS_URL: &str = "https://chunithm.sega.jp/storage/json/music.json";
+const SONGS_URL: &str =
+    "https://raw.githubusercontent.com/beer-psi/chuni-penguin/refs/heads/trunk/chuni_penguin/database/seeds/songs.json";
 const SONGS_FETCH_RETRIES: usize = 5;
 const SONGS_FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
 const SONGS_CACHE_FILE_NAME: &str = "chunithm_songs_cache.json";
