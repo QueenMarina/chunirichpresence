@@ -228,8 +228,8 @@ pub fn log_hook_install_results(results: &[HookInstallStatus]) {
 pub fn log_memory_snapshot() {
     let snapshot = memory::memory_snapshot();
     log_message(format!(
-        "Memory snapshot: is_playing={:?}, song_id={:?}, difficulty={:?}",
-        snapshot.is_playing, snapshot.song_id, snapshot.difficulty
+        "Memory snapshot: is_playing={:?}, song_id={:?}, difficulty={:?}, player_rating={:?}",
+        snapshot.is_playing, snapshot.song_id, snapshot.difficulty, snapshot.player_rating
     ));
 }
 
@@ -259,6 +259,12 @@ pub fn log_memory_probe_status() {
         status.difficulty.installed,
         format_optional_addr(status.difficulty.target_addr),
         status.difficulty.cached_value
+    ));
+    log_message(format!(
+        "Memory probe: player-rating hook installed={} target={} cached={:?}",
+        status.player_rating.installed,
+        format_optional_addr(status.player_rating.target_addr),
+        status.player_rating.cached_value
     ));
     log_message(format!(
         "Memory probe: play-state hooks enter_installed={} enter_target={} exit_installed={} exit_target={} cached={:?}",

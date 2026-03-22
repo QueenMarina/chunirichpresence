@@ -75,6 +75,27 @@ fn difficulty_state_label(song: Option<&Song>, difficulty: i32) -> String {
     }
 }
 
+fn rating_label(player_rating: Option<i32>) -> Option<String> {
+    player_rating
+        .filter(|player_rating| *player_rating > 0)
+        .map(|player_rating| {
+            let whole = player_rating / 100;
+            let fractional = player_rating % 100;
+            format!("{whole}.{fractional:02} Rating")
+        })
+}
+
+fn song_select_state_label(player_rating: Option<i32>) -> Option<String> {
+    rating_label(player_rating)
+}
+
+fn playing_state_label(base_state: String, player_rating: Option<i32>) -> String {
+    match rating_label(player_rating) {
+        Some(rating) => format!("{base_state} • {rating}"),
+        None => base_state,
+    }
+}
+
 fn sanitize_ini_value(value: Option<String>) -> Option<String> {
     let value = value?;
     let trimmed = value.trim();
@@ -137,31 +158,39 @@ fn load_presence_config() -> RichPresenceConfig {
     config
 }
 
-fn default_activity(config: &RichPresenceConfig) -> activity::Activity<'static> {
-    activity::Activity::new()
+fn default_activity(
+    config: &RichPresenceConfig,
+    player_rating: Option<i32>,
+) -> activity::Activity<'static> {
+    let activity = activity::Activity::new()
         .name(config.game_name.clone())
-        .details(format!("Playing {}", config.game_name))
-        .state("In song select")
+        .details("In song select")
         .assets(
             activity::Assets::new()
                 .large_image(config.logo_url.clone())
                 .large_text(config.game_name.clone()),
-        )
+        );
+
+    match song_select_state_label(player_rating) {
+        Some(state) => activity.state(state),
+        None => activity,
+    }
 }
 
 fn song_activity(
     song: &Song,
     difficulty: i32,
+    player_rating: Option<i32>,
     config: &RichPresenceConfig,
 ) -> activity::Activity<'static> {
     let image_url = format!("{}{id}.webp", SONG_JACKET_BASE_URL, id = song.id);
     let subtitle = format!("Playing {} - {}", song.title, song.artist);
-    let difficulty_state = difficulty_state_label(Some(song), difficulty);
+    let state = playing_state_label(difficulty_state_label(Some(song), difficulty), player_rating);
 
     activity::Activity::new()
         .name(config.game_name.clone())
         .details(subtitle)
-        .state(difficulty_state)
+        .state(state)
         .assets(
             activity::Assets::new()
                 .large_image(image_url.clone())
@@ -171,14 +200,15 @@ fn song_activity(
 
 fn unknown_song_activity(
     difficulty: i32,
+    player_rating: Option<i32>,
     config: &RichPresenceConfig,
 ) -> activity::Activity<'static> {
-    let difficulty_state = difficulty_state_label(None, difficulty);
+    let state = playing_state_label(difficulty_state_label(None, difficulty), player_rating);
 
     activity::Activity::new()
         .name(config.game_name.clone())
         .details("Playing a song")
-        .state(difficulty_state)
+        .state(state)
         .assets(
             activity::Assets::new()
                 .large_image(config.logo_url.clone())
@@ -190,6 +220,7 @@ pub(crate) fn resolve_playing_presence_state(
     songs_by_id: &SongsById,
     current_song_id: Option<i32>,
     current_difficulty: i32,
+    current_player_rating: Option<i32>,
     last_song_id: &mut i32,
 ) -> PresenceState {
     match current_song_id {
@@ -209,9 +240,13 @@ pub(crate) fn resolve_playing_presence_state(
                 PresenceState::Song {
                     id: song_id,
                     difficulty: current_difficulty,
+                    player_rating: current_player_rating,
                 }
             } else {
-                PresenceState::UnknownSong(current_difficulty)
+                PresenceState::UnknownSong {
+                    difficulty: current_difficulty,
+                    player_rating: current_player_rating,
+                }
             }
         }
         Some(song_id) => {
@@ -219,9 +254,15 @@ pub(crate) fn resolve_playing_presence_state(
                 log(format!("Invalid Song ID while playing: {}", song_id));
                 *last_song_id = song_id;
             }
-            PresenceState::UnknownSong(current_difficulty)
+            PresenceState::UnknownSong {
+                difficulty: current_difficulty,
+                player_rating: current_player_rating,
+            }
         }
-        None => PresenceState::UnknownSong(current_difficulty),
+        None => PresenceState::UnknownSong {
+            difficulty: current_difficulty,
+            player_rating: current_player_rating,
+        },
     }
 }
 
@@ -250,9 +291,11 @@ fn connect_discord_and_set_default(
     last_presence_update: &mut Instant,
 ) -> Option<DiscordIpcClient> {
     let mut client = create_discord_client(&config.discord_app_id)?;
-    if client.set_activity(default_activity(config)).is_ok() {
+    if client.set_activity(default_activity(config, None)).is_ok() {
         log("Discord presence updated: default presence (song select)".to_string());
-        *current_presence_state = Some(PresenceState::Default);
+        *current_presence_state = Some(PresenceState::Default {
+            player_rating: None,
+        });
         *last_presence_update = Instant::now();
     } else {
         log("Failed to update Discord RPC for default presence (song select)".to_string());
@@ -269,23 +312,31 @@ fn update_presence(
     config: &RichPresenceConfig,
 ) -> bool {
     let (activity_description, activity) = match state {
-        PresenceState::Default => (
+        PresenceState::Default { player_rating } => (
             "default presence (song select)".to_string(),
-            default_activity(config),
+            default_activity(config, *player_rating),
         ),
-        PresenceState::UnknownSong(difficulty) => (
+        PresenceState::UnknownSong {
+            difficulty,
+            player_rating,
+        } => (
             format!("unknown song ({})", difficulty_label(*difficulty)),
-            unknown_song_activity(*difficulty, config),
+            unknown_song_activity(*difficulty, *player_rating, config),
         ),
-        PresenceState::Song { id, difficulty } => match get_song_by_id(songs_by_id, *id) {
+        PresenceState::Song {
+            id,
+            difficulty,
+            player_rating,
+        } => match get_song_by_id(songs_by_id, *id) {
             Some(song) => {
-                let difficulty_state = difficulty_state_label(Some(&song), *difficulty);
+                let state_label =
+                    playing_state_label(difficulty_state_label(Some(&song), *difficulty), *player_rating);
                 (
                     format!(
                         "song {} - {} ({})",
-                        song.title, song.artist, difficulty_state
+                        song.title, song.artist, state_label
                     ),
-                    song_activity(&song, *difficulty, config),
+                    song_activity(&song, *difficulty, *player_rating, config),
                 )
             }
             None => (
@@ -294,7 +345,7 @@ fn update_presence(
                     id,
                     difficulty_label(*difficulty)
                 ),
-                unknown_song_activity(*difficulty, config),
+                unknown_song_activity(*difficulty, *player_rating, config),
             ),
         },
     };
@@ -426,7 +477,9 @@ fn main_thread() {
             if runtime.discord_client.is_some() && runtime.current_presence_state.is_none() {
                 apply_presence_state_if_needed(
                     &mut runtime,
-                    PresenceState::Default,
+                    PresenceState::Default {
+                        player_rating: None,
+                    },
                     &songs_by_id,
                     &presence_config,
                 );

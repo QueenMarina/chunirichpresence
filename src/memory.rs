@@ -26,6 +26,7 @@ const PLAY_STATE_VALUE_SONG_SELECT: i32 = 3;
 // Sentinel values used for hook caches.
 const SONG_ID_UNSET: i32 = i32::MIN;
 const DIFFICULTY_UNSET: i32 = i32::MIN;
+const PLAYER_RATING_UNSET: i32 = i32::MIN;
 const PLAY_STATE_UNSET: i32 = i32::MIN;
 
 // PE header offsets used when scanning the module image.
@@ -191,6 +192,49 @@ const DIFFICULTY_HOOK: HookConfig = HookConfig {
     callback: difficulty_hook_callback,
 };
 
+static PLAYER_RATING_HOOK_STATE: HookState = HookState::new();
+static LAST_HOOKED_PLAYER_RATING: AtomicI32 = AtomicI32::new(PLAYER_RATING_UNSET);
+
+const PLAYER_RATING_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
+    overwrite_len: 6,
+    fallback_rva: 0x006FFC9D,
+    pattern: &[
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x82),
+        PatternByte::Exact(0x90),
+        PatternByte::Exact(0x01),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x81),
+        PatternByte::Exact(0xC4),
+        PatternByte::Exact(0x2B),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x0F),
+        PatternByte::Exact(0x95),
+        PatternByte::Exact(0xC3),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x82),
+        PatternByte::Exact(0x94),
+        PatternByte::Exact(0x01),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x81),
+        PatternByte::Exact(0xC0),
+        PatternByte::Exact(0x2B),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+    ],
+};
+
+const PLAYER_RATING_HOOK: HookConfig = HookConfig {
+    name: "player rating",
+    targets: &[PLAYER_RATING_CURRENT_TARGET],
+    callback: player_rating_hook_callback,
+};
+
 static PLAY_STATE_ENTER_HOOK_STATE: HookState = HookState::new();
 static PLAY_STATE_EXIT_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_PLAY_STATE: AtomicI32 = AtomicI32::new(PLAY_STATE_UNSET);
@@ -283,10 +327,16 @@ pub(crate) unsafe fn read_presence_state_from_memory(
     latched_song_id: &mut Option<i32>,
     latched_difficulty: &mut Option<i32>,
 ) -> Option<(bool, PresenceState)> {
+    let current_player_rating = current_hooked_player_rating();
     let is_playing = is_playing_now();
     if !is_playing {
         reset_play_latches(last_song_id, latched_song_id, latched_difficulty);
-        return Some((false, PresenceState::Default));
+        return Some((
+            false,
+            PresenceState::Default {
+                player_rating: current_player_rating,
+            },
+        ));
     }
 
     let live_song_id = current_hooked_song_id();
@@ -295,12 +345,22 @@ pub(crate) unsafe fn read_presence_state_from_memory(
     if !was_playing {
         let Some(song_id) = live_song_id.filter(|song_id| *song_id != -1) else {
             reset_play_latches(last_song_id, latched_song_id, latched_difficulty);
-            return Some((false, PresenceState::Default));
+            return Some((
+                false,
+                PresenceState::Default {
+                    player_rating: current_player_rating,
+                },
+            ));
         };
 
         let Some(difficulty) = current_difficulty else {
             reset_play_latches(last_song_id, latched_song_id, latched_difficulty);
-            return Some((false, PresenceState::Default));
+            return Some((
+                false,
+                PresenceState::Default {
+                    player_rating: current_player_rating,
+                },
+            ));
         };
 
         *latched_song_id = Some(song_id);
@@ -315,6 +375,7 @@ pub(crate) unsafe fn read_presence_state_from_memory(
         songs_by_id,
         current_song_id,
         current_difficulty,
+        current_player_rating,
         last_song_id,
     );
     Some((true, desired_presence_state))
@@ -324,6 +385,7 @@ pub(crate) fn install_runtime_hooks() -> Vec<HookInstallStatus> {
     vec![
         install_runtime_hook(&SONG_ID_HOOK_STATE, &SONG_ID_HOOK),
         install_runtime_hook(&DIFFICULTY_HOOK_STATE, &DIFFICULTY_HOOK),
+        install_runtime_hook(&PLAYER_RATING_HOOK_STATE, &PLAYER_RATING_HOOK),
         install_runtime_hook(&PLAY_STATE_ENTER_HOOK_STATE, &PLAY_STATE_ENTER_HOOK),
         install_runtime_hook(&PLAY_STATE_EXIT_HOOK_STATE, &PLAY_STATE_EXIT_HOOK),
     ]
@@ -352,6 +414,11 @@ pub(crate) fn memory_probe_status() -> MemoryProbeStatus {
             target_addr: DIFFICULTY_HOOK_STATE.target_addr(),
             cached_value: current_hooked_difficulty(),
         },
+        player_rating: IntegerHookProbeStatus {
+            installed: PLAYER_RATING_HOOK_STATE.installed.load(Ordering::Relaxed),
+            target_addr: PLAYER_RATING_HOOK_STATE.target_addr(),
+            cached_value: current_hooked_player_rating(),
+        },
         play_state: PlayStateHookProbeStatus {
             enter_installed: PLAY_STATE_ENTER_HOOK_STATE
                 .installed
@@ -370,6 +437,7 @@ pub(crate) fn memory_snapshot() -> MemorySnapshot {
             is_playing: Some(is_playing_now()),
             song_id: current_hooked_song_id(),
             difficulty: current_hooked_difficulty(),
+            player_rating: current_hooked_player_rating(),
         }
     }
 }
@@ -404,6 +472,10 @@ fn current_hooked_song_id() -> Option<i32> {
 
 fn current_hooked_difficulty() -> Option<i32> {
     current_cached_i32(&LAST_HOOKED_DIFFICULTY, DIFFICULTY_UNSET)
+}
+
+fn current_hooked_player_rating() -> Option<i32> {
+    current_cached_i32(&LAST_HOOKED_PLAYER_RATING, PLAYER_RATING_UNSET)
 }
 
 fn current_hooked_play_state() -> Option<bool> {
@@ -444,6 +516,19 @@ unsafe extern "system" fn difficulty_hook_callback(registers: *const PushadRegis
     let difficulty = (registers.eax & 0xFF) as i32;
     if (0..=4).contains(&difficulty) {
         LAST_HOOKED_DIFFICULTY.store(difficulty, Ordering::Relaxed);
+    }
+}
+
+unsafe extern "system" fn player_rating_hook_callback(registers: *const PushadRegisters) {
+    let Some(registers) = registers.as_ref() else {
+        return;
+    };
+
+    let player_rating = registers.eax as i32;
+    if player_rating > 0 {
+        LAST_HOOKED_PLAYER_RATING.store(player_rating, Ordering::Relaxed);
+    } else {
+        LAST_HOOKED_PLAYER_RATING.store(PLAYER_RATING_UNSET, Ordering::Relaxed);
     }
 }
 

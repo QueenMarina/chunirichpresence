@@ -66,9 +66,16 @@ pub struct RichPresenceConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresenceState {
-    Default,
-    UnknownSong(i32),
-    Song { id: i32, difficulty: i32 },
+    Default { player_rating: Option<i32> },
+    UnknownSong {
+        difficulty: i32,
+        player_rating: Option<i32>,
+    },
+    Song {
+        id: i32,
+        difficulty: i32,
+        player_rating: Option<i32>,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -241,6 +248,7 @@ pub(crate) struct MemoryProbeStatus {
     pub module: Option<GameModuleInfo>,
     pub song_id: IntegerHookProbeStatus,
     pub difficulty: IntegerHookProbeStatus,
+    pub player_rating: IntegerHookProbeStatus,
     pub play_state: PlayStateHookProbeStatus,
 }
 
@@ -249,4 +257,5 @@ pub(crate) struct MemorySnapshot {
     pub is_playing: Option<bool>,
     pub song_id: Option<i32>,
     pub difficulty: Option<i32>,
+    pub player_rating: Option<i32>,
 }
