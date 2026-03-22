@@ -229,9 +229,48 @@ const PLAYER_RATING_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
     ],
 };
 
+const PLAYER_RATING_OLD_TARGET: HookTargetConfig = HookTargetConfig {
+    overwrite_len: 6,
+    fallback_rva: 0x007579CA,
+    pattern: &[
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x82),
+        PatternByte::Exact(0x90),
+        PatternByte::Exact(0x01),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x81),
+        PatternByte::Exact(0xFC),
+        PatternByte::Exact(0x2A),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x82),
+        PatternByte::Exact(0x94),
+        PatternByte::Exact(0x01),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x81),
+        PatternByte::Exact(0xF8),
+        PatternByte::Exact(0x2A),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x82),
+        PatternByte::Exact(0x98),
+        PatternByte::Exact(0x01),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x07),
+    ],
+};
+
 const PLAYER_RATING_HOOK: HookConfig = HookConfig {
     name: "player rating",
-    targets: &[PLAYER_RATING_CURRENT_TARGET],
+    targets: &[PLAYER_RATING_CURRENT_TARGET, PLAYER_RATING_OLD_TARGET],
     callback: player_rating_hook_callback,
 };
 

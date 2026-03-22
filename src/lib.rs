@@ -91,7 +91,7 @@ fn song_select_state_label(player_rating: Option<i32>) -> Option<String> {
 
 fn playing_state_label(base_state: String, player_rating: Option<i32>) -> String {
     match rating_label(player_rating) {
-        Some(rating) => format!("{base_state} • {rating}"),
+        Some(rating) => format!("{base_state} | {rating}"),
         None => base_state,
     }
 }
@@ -545,4 +545,12 @@ pub extern "system" fn DllMain(
         }
         _ => TRUE,
     }
+}
+
+// Magic stub to fix 32-bit MinGW cross-compilation linker errors.
+// We compile with panic="abort", so this should never be reached in practice.
+#[cfg(all(target_os = "windows", target_env = "gnu", target_pointer_width = "32"))]
+#[no_mangle]
+pub extern "C" fn _Unwind_Resume() -> ! {
+    std::process::abort();
 }
