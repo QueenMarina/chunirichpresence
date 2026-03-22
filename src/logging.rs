@@ -213,9 +213,13 @@ pub fn log_hook_install_results(results: &[HookInstallStatus]) {
                 log_message(format!("Failed to install {} hook: {}", result.name, error))
             }
             None => log_message(format!(
-                "Installed {} hook at {}",
+                "Installed {} hook at {} via {}",
                 result.name,
-                format_optional_addr(result.target_addr)
+                format_optional_addr(result.target_addr),
+                result
+                    .resolution_source
+                    .map(|source| source.to_string())
+                    .unwrap_or_else(|| "unknown source".to_string())
             )),
         }
     }

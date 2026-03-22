@@ -60,12 +60,28 @@ impl fmt::Display for HookInstallError {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum HookResolutionSource {
+    HardcodedAddress,
+    PatternScan,
+}
+
+impl fmt::Display for HookResolutionSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HardcodedAddress => f.write_str("hardcoded address"),
+            Self::PatternScan => f.write_str("pattern scan"),
+        }
+    }
+}
+
 pub(crate) struct HookState {
     pub once: Once,
     pub installed: AtomicBool,
     pub target: AtomicUsize,
     pub trampoline: AtomicUsize,
     pub stub: AtomicUsize,
+    pub resolution_source: OnceLock<HookResolutionSource>,
     pub install_error: OnceLock<HookInstallError>,
 }
 
@@ -77,6 +93,7 @@ impl HookState {
             target: AtomicUsize::new(0),
             trampoline: AtomicUsize::new(0),
             stub: AtomicUsize::new(0),
+            resolution_source: OnceLock::new(),
             install_error: OnceLock::new(),
         }
     }
@@ -92,6 +109,7 @@ impl HookState {
         );
         self.stub
             .store(install.stub_addr, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.resolution_source.set(install.resolution_source);
     }
 
     pub(crate) fn store_error(&self, error: HookInstallError) {
@@ -104,20 +122,30 @@ impl HookState {
             addr => Some(addr),
         }
     }
+
+    pub(crate) fn resolution_source(&self) -> Option<HookResolutionSource> {
+        self.resolution_source.get().copied()
+    }
 }
 
 pub(crate) struct HookConfig {
     pub name: &'static str,
+    pub targets: &'static [HookTargetConfig],
+    pub callback: unsafe extern "system" fn(*const PushadRegisters),
+}
+
+#[derive(Copy, Clone)]
+pub(crate) struct HookTargetConfig {
     pub overwrite_len: usize,
     pub fallback_rva: usize,
     pub pattern: &'static [PatternByte],
-    pub callback: unsafe extern "system" fn(*const PushadRegisters),
 }
 
 pub(crate) struct InstalledHook {
     pub target_addr: usize,
     pub trampoline_addr: usize,
     pub stub_addr: usize,
+    pub resolution_source: HookResolutionSource,
 }
 
 #[repr(C)]
@@ -142,6 +170,7 @@ pub(crate) struct GameModuleInfo {
 pub(crate) struct HookInstallStatus {
     pub name: &'static str,
     pub target_addr: Option<usize>,
+    pub resolution_source: Option<HookResolutionSource>,
     pub error: Option<HookInstallError>,
 }
 

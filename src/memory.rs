@@ -1,7 +1,7 @@
 use crate::types::{
-    GameModuleInfo, HookConfig, HookInstallError, HookInstallStatus, HookState, InstalledHook,
-    IntegerHookProbeStatus, MemoryProbeStatus, MemorySnapshot, PatternByte,
-    PlayStateHookProbeStatus, PresenceState, PushadRegisters, Song,
+    GameModuleInfo, HookConfig, HookInstallError, HookInstallStatus, HookResolutionSource,
+    HookState, HookTargetConfig, InstalledHook, IntegerHookProbeStatus, MemoryProbeStatus,
+    MemorySnapshot, PatternByte, PlayStateHookProbeStatus, PresenceState, PushadRegisters, Song,
 };
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -36,8 +36,7 @@ const PE_SIZE_OF_IMAGE_OFFSET: usize = 0x50;
 static SONG_ID_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_SONG_ID: AtomicI32 = AtomicI32::new(SONG_ID_UNSET);
 
-const SONG_ID_HOOK: HookConfig = HookConfig {
-    name: "song ID",
+const SONG_ID_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
     overwrite_len: 6,
     fallback_rva: 0x00965C35,
     pattern: &[
@@ -63,14 +62,63 @@ const SONG_ID_HOOK: HookConfig = HookConfig {
         PatternByte::Exact(0x46),
         PatternByte::Exact(0x58),
     ],
+};
+
+const SONG_ID_OLD_TARGET: HookTargetConfig = HookTargetConfig {
+    overwrite_len: 7,
+    fallback_rva: 0x008C4FB7,
+    pattern: &[
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x10),
+        PatternByte::Exact(0x0F),
+        PatternByte::Exact(0xB6),
+        PatternByte::Exact(0x46),
+        PatternByte::Exact(0x14),
+        PatternByte::Exact(0x88),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x14),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x46),
+        PatternByte::Exact(0x18),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x18),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x46),
+        PatternByte::Exact(0x1C),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x1C),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x46),
+        PatternByte::Exact(0x20),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x20),
+        PatternByte::Exact(0x8D),
+        PatternByte::Exact(0x73),
+        PatternByte::Exact(0x08),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0xCE),
+        PatternByte::Exact(0xE8),
+        PatternByte::Any,
+        PatternByte::Any,
+        PatternByte::Any,
+        PatternByte::Any,
+    ],
+};
+
+const SONG_ID_HOOK: HookConfig = HookConfig {
+    name: "song ID",
+    targets: &[SONG_ID_CURRENT_TARGET, SONG_ID_OLD_TARGET],
     callback: song_id_hook_callback,
 };
 
 static DIFFICULTY_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_DIFFICULTY: AtomicI32 = AtomicI32::new(DIFFICULTY_UNSET);
 
-const DIFFICULTY_HOOK: HookConfig = HookConfig {
-    name: "difficulty",
+const DIFFICULTY_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
     overwrite_len: 6,
     fallback_rva: 0x0085BB8A,
     pattern: &[
@@ -99,6 +147,49 @@ const DIFFICULTY_HOOK: HookConfig = HookConfig {
         PatternByte::Exact(0x41),
         PatternByte::Exact(0x20),
     ],
+};
+
+const DIFFICULTY_OLD_TARGET: HookTargetConfig = HookTargetConfig {
+    overwrite_len: 6,
+    fallback_rva: 0x008C4FBE,
+    pattern: &[
+        PatternByte::Exact(0x88),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x14),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x46),
+        PatternByte::Exact(0x18),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x18),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x46),
+        PatternByte::Exact(0x1C),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x1C),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x46),
+        PatternByte::Exact(0x20),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x20),
+        PatternByte::Exact(0x8D),
+        PatternByte::Exact(0x73),
+        PatternByte::Exact(0x08),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0xCE),
+        PatternByte::Exact(0xE8),
+        PatternByte::Any,
+        PatternByte::Any,
+        PatternByte::Any,
+        PatternByte::Any,
+    ],
+};
+
+const DIFFICULTY_HOOK: HookConfig = HookConfig {
+    name: "difficulty",
+    targets: &[DIFFICULTY_CURRENT_TARGET, DIFFICULTY_OLD_TARGET],
     callback: difficulty_hook_callback,
 };
 
@@ -106,8 +197,7 @@ static PLAY_STATE_ENTER_HOOK_STATE: HookState = HookState::new();
 static PLAY_STATE_EXIT_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_PLAY_STATE: AtomicI32 = AtomicI32::new(PLAY_STATE_UNSET);
 
-const PLAY_STATE_ENTER_HOOK: HookConfig = HookConfig {
-    name: "play-state enter",
+const PLAY_STATE_ENTER_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
     overwrite_len: 6,
     fallback_rva: 0x00F5C4CE,
     pattern: &[
@@ -122,11 +212,34 @@ const PLAY_STATE_ENTER_HOOK: HookConfig = HookConfig {
         PatternByte::Exact(0x04),
         PatternByte::Exact(0x5B),
     ],
+};
+
+const PLAY_STATE_ENTER_OLD_TARGET: HookTargetConfig = HookTargetConfig {
+    overwrite_len: 6,
+    fallback_rva: 0x00FA83AC,
+    pattern: &[
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x1D),
+        PatternByte::Any,
+        PatternByte::Any,
+        PatternByte::Any,
+        PatternByte::Any,
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x30),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x70),
+        PatternByte::Exact(0x04),
+        PatternByte::Exact(0x5B),
+    ],
+};
+
+const PLAY_STATE_ENTER_HOOK: HookConfig = HookConfig {
+    name: "play-state enter",
+    targets: &[PLAY_STATE_ENTER_CURRENT_TARGET, PLAY_STATE_ENTER_OLD_TARGET],
     callback: play_state_enter_hook_callback,
 };
 
-const PLAY_STATE_EXIT_HOOK: HookConfig = HookConfig {
-    name: "play-state exit",
+const PLAY_STATE_EXIT_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
     overwrite_len: 6,
     fallback_rva: 0x00F5DDDC,
     pattern: &[
@@ -139,6 +252,28 @@ const PLAY_STATE_EXIT_HOOK: HookConfig = HookConfig {
         PatternByte::Exact(0x5F),
         PatternByte::Exact(0x5B),
     ],
+};
+
+const PLAY_STATE_EXIT_OLD_TARGET: HookTargetConfig = HookTargetConfig {
+    overwrite_len: 6,
+    fallback_rva: 0x00FA993F,
+    pattern: &[
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x1D),
+        PatternByte::Any,
+        PatternByte::Any,
+        PatternByte::Any,
+        PatternByte::Any,
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0xC6),
+        PatternByte::Exact(0x5F),
+        PatternByte::Exact(0x5B),
+    ],
+};
+
+const PLAY_STATE_EXIT_HOOK: HookConfig = HookConfig {
+    name: "play-state exit",
+    targets: &[PLAY_STATE_EXIT_CURRENT_TARGET, PLAY_STATE_EXIT_OLD_TARGET],
     callback: play_state_exit_hook_callback,
 };
 
@@ -345,6 +480,7 @@ fn install_runtime_hook(state: &HookState, config: &HookConfig) -> HookInstallSt
     HookInstallStatus {
         name: config.name,
         target_addr: state.target_addr(),
+        resolution_source: state.resolution_source(),
         error: state.install_error.get().cloned(),
     }
 }
@@ -352,22 +488,54 @@ fn install_runtime_hook(state: &HookState, config: &HookConfig) -> HookInstallSt
 unsafe fn install_hook_once(config: &HookConfig) -> Result<InstalledHook, HookInstallError> {
     let module_handle = get_module_handle().ok_or(HookInstallError::GameModuleHandleNotFound)?;
     let module_base = module_handle as usize;
-    let target_addr = resolve_hook_target(module_base, config)
+    let resolved_target = resolve_hook_target(module_base, config)
         .ok_or(HookInstallError::HookSignatureNotFound(config.name))?;
-    let trampoline_addr = create_trampoline(target_addr, config.overwrite_len)?;
+    let target_addr = resolved_target.addr;
+    let trampoline_addr = create_trampoline(target_addr, resolved_target.overwrite_len)?;
     let stub_addr = create_hook_stub(trampoline_addr, config.callback)?;
-    patch_hook_target(target_addr, config.overwrite_len, stub_addr)?;
+    patch_hook_target(target_addr, resolved_target.overwrite_len, stub_addr)?;
 
     Ok(InstalledHook {
         target_addr,
         trampoline_addr,
         stub_addr,
+        resolution_source: resolved_target.source,
     })
 }
 
-unsafe fn resolve_hook_target(module_base: usize, config: &HookConfig) -> Option<usize> {
-    verify_hook_fallback_target(module_base, config.fallback_rva, config.pattern)
-        .or_else(|| find_hook_target(module_base, config.pattern))
+struct ResolvedHookTarget {
+    addr: usize,
+    overwrite_len: usize,
+    source: HookResolutionSource,
+}
+
+unsafe fn resolve_hook_target(
+    module_base: usize,
+    config: &HookConfig,
+) -> Option<ResolvedHookTarget> {
+    for target in config.targets {
+        if let Some(addr) =
+            verify_hook_fallback_target(module_base, target.fallback_rva, target.pattern)
+        {
+            return Some(ResolvedHookTarget {
+                addr,
+                overwrite_len: target.overwrite_len,
+                source: HookResolutionSource::HardcodedAddress,
+            });
+        }
+    }
+
+    for target in config.targets {
+        if let Some(addr) = find_hook_target(module_base, target.pattern) {
+            return Some(ResolvedHookTarget {
+                addr,
+                overwrite_len: target.overwrite_len,
+                source: HookResolutionSource::PatternScan,
+            });
+        }
+    }
+
+    None
 }
 
 unsafe fn create_trampoline(
