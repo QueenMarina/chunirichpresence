@@ -37,30 +37,34 @@ static SONG_ID_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_SONG_ID: AtomicI32 = AtomicI32::new(SONG_ID_UNSET);
 
 const SONG_ID_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
-    overwrite_len: 6,
-    fallback_rva: 0x00965C35,
+    overwrite_len: 7,
+    fallback_rva: 0x0085BB83,
     pattern: &[
-        PatternByte::Exact(0x83),
-        PatternByte::Exact(0xC4),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x10),
+        PatternByte::Exact(0x0F),
+        PatternByte::Exact(0xB6),
+        PatternByte::Exact(0x46),
+        PatternByte::Exact(0x14),
+        PatternByte::Exact(0x88),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x14),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x46),
+        PatternByte::Exact(0x18),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x18),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x46),
         PatternByte::Exact(0x1C),
         PatternByte::Exact(0x89),
+        PatternByte::Exact(0x41),
+        PatternByte::Exact(0x1C),
+        PatternByte::Exact(0x8B),
         PatternByte::Exact(0x46),
-        PatternByte::Exact(0x60),
-        PatternByte::Exact(0xE8),
-        PatternByte::Any,
-        PatternByte::Any,
-        PatternByte::Any,
-        PatternByte::Any,
-        PatternByte::Exact(0x6A),
-        PatternByte::Exact(0x01),
-        PatternByte::Exact(0xE9),
-        PatternByte::Any,
-        PatternByte::Any,
-        PatternByte::Any,
-        PatternByte::Any,
-        PatternByte::Exact(0x8D),
-        PatternByte::Exact(0x46),
-        PatternByte::Exact(0x58),
+        PatternByte::Exact(0x20),
     ],
 };
 
@@ -140,12 +144,6 @@ const DIFFICULTY_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
         PatternByte::Exact(0x8B),
         PatternByte::Exact(0x46),
         PatternByte::Exact(0x20),
-        PatternByte::Exact(0x8D),
-        PatternByte::Exact(0x73),
-        PatternByte::Exact(0x08),
-        PatternByte::Exact(0x89),
-        PatternByte::Exact(0x41),
-        PatternByte::Exact(0x20),
     ],
 };
 
@@ -199,7 +197,7 @@ static LAST_HOOKED_PLAY_STATE: AtomicI32 = AtomicI32::new(PLAY_STATE_UNSET);
 
 const PLAY_STATE_ENTER_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
     overwrite_len: 6,
-    fallback_rva: 0x00F5C4CE,
+    fallback_rva: 0x00F5BF9E,
     pattern: &[
         PatternByte::Exact(0x89),
         PatternByte::Exact(0x1D),
@@ -241,7 +239,7 @@ const PLAY_STATE_ENTER_HOOK: HookConfig = HookConfig {
 
 const PLAY_STATE_EXIT_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
     overwrite_len: 6,
-    fallback_rva: 0x00F5DDDC,
+    fallback_rva: 0x00F5D8AC,
     pattern: &[
         PatternByte::Exact(0x89),
         PatternByte::Exact(0x1D),
