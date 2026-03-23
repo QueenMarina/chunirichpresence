@@ -19,6 +19,7 @@ You can customize behavior in `segatools.ini` under the `[chunirichpresence]` se
 game_name=Chunithm
 logo_url=https://chunithm.org/assets/logo.png
 discord_app_id=1482780703128289493
+show_rating=0
 ```
 
 Supported options:
@@ -26,6 +27,7 @@ Supported options:
 - `game_name`: display name used in Discord Rich Presence.
 - `logo_url`: default image used when not actively playing a song.
 - `discord_app_id`: Discord application ID used for RPC.
+- `show_rating`: optional toggle for showing player rating in Discord Rich Presence. Defaults to enabled; set `show_rating=0` to hide it.
 
 If a value is missing, the built-in default is used.
 You do not need to create a Discord app ID, you can use the provided one, but the option is provided if needed

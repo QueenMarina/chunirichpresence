@@ -52,6 +52,7 @@ impl Default for RichPresenceConfig {
             logo_url: DEFAULT_LOGO_URL.to_string(),
             game_name: DEFAULT_GAME_NAME.to_string(),
             discord_app_id: DEFAULT_DISCORD_APP_ID.to_string(),
+            show_rating: true,
         }
     }
 }
@@ -83,6 +84,13 @@ fn rating_label(player_rating: Option<i32>) -> Option<String> {
             let fractional = player_rating % 100;
             format!("{whole}.{fractional:02} Rating")
         })
+}
+
+fn display_player_rating(
+    config: &RichPresenceConfig,
+    player_rating: Option<i32>,
+) -> Option<i32> {
+    config.show_rating.then_some(player_rating).flatten()
 }
 
 fn song_select_state_label(player_rating: Option<i32>) -> Option<String> {
@@ -147,12 +155,17 @@ fn load_presence_config() -> RichPresenceConfig {
         config.discord_app_id = value;
     }
 
+    if let Some(value) = sanitize_ini_value(ini.get("chunirichpresence", "show_rating")) {
+        config.show_rating = value != "0";
+    }
+
     log(format!(
-        "Loaded config from {} (game_name='{}', logo_url='{}', discord_app_id='{}')",
+        "Loaded config from {} (game_name='{}', logo_url='{}', discord_app_id='{}', show_rating={})",
         ini_path.display(),
         config.game_name,
         config.logo_url,
-        config.discord_app_id
+        config.discord_app_id,
+        config.show_rating
     ));
 
     config
@@ -162,6 +175,7 @@ fn default_activity(
     config: &RichPresenceConfig,
     player_rating: Option<i32>,
 ) -> activity::Activity<'static> {
+    let player_rating = display_player_rating(config, player_rating);
     let activity = activity::Activity::new()
         .name(config.game_name.clone())
         .details("In song select")
@@ -183,6 +197,7 @@ fn song_activity(
     player_rating: Option<i32>,
     config: &RichPresenceConfig,
 ) -> activity::Activity<'static> {
+    let player_rating = display_player_rating(config, player_rating);
     let image_url = format!("{}{id}.webp", SONG_JACKET_BASE_URL, id = song.id);
     let subtitle = format!("Playing {} - {}", song.title, song.artist);
     let state = playing_state_label(difficulty_state_label(Some(song), difficulty), player_rating);
@@ -203,6 +218,7 @@ fn unknown_song_activity(
     player_rating: Option<i32>,
     config: &RichPresenceConfig,
 ) -> activity::Activity<'static> {
+    let player_rating = display_player_rating(config, player_rating);
     let state = playing_state_label(difficulty_state_label(None, difficulty), player_rating);
 
     activity::Activity::new()

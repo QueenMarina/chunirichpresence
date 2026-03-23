@@ -62,6 +62,7 @@ pub struct RichPresenceConfig {
     pub logo_url: String,
     pub game_name: String,
     pub discord_app_id: String,
+    pub show_rating: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
