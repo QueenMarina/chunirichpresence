@@ -70,7 +70,10 @@ When enabled, logs are written to `chunirichpresence.log` next to `chunirichpres
 
 ## Testing
 
-This has been tested with Chunithm XVERSE Final on Windows 10.
+Tested in:
+- Chunithm XVERSE 2.41 Final
+- Chunithm VERSE
+- Chunithm Luminous
 
 ## Disclaimer
 
