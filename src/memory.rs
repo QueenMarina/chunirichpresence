@@ -195,6 +195,40 @@ const DIFFICULTY_HOOK: HookConfig = HookConfig {
 static PLAYER_RATING_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_PLAYER_RATING: AtomicI32 = AtomicI32::new(PLAYER_RATING_UNSET);
 
+const PLAYER_RATING_247_TARGET: HookTargetConfig = HookTargetConfig {
+    overwrite_len: 6,
+    fallback_rva: 0x0070A0ED,
+    pattern: &[
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x82),
+        PatternByte::Exact(0x90),
+        PatternByte::Exact(0x01),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x81),
+        PatternByte::Exact(0x5C),
+        PatternByte::Exact(0x2C),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x0F),
+        PatternByte::Exact(0x95),
+        PatternByte::Exact(0xC3),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x82),
+        PatternByte::Exact(0x94),
+        PatternByte::Exact(0x01),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x81),
+        PatternByte::Exact(0x58),
+        PatternByte::Exact(0x2C),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+    ],
+};
+
 const PLAYER_RATING_XVERSE_X_TARGET: HookTargetConfig = HookTargetConfig {
     overwrite_len: 6,
     fallback_rva: 0x00709C9D,
@@ -305,6 +339,7 @@ const PLAYER_RATING_OLD_TARGET: HookTargetConfig = HookTargetConfig {
 const PLAYER_RATING_HOOK: HookConfig = HookConfig {
     name: "player rating",
     targets: &[
+        PLAYER_RATING_247_TARGET,
         PLAYER_RATING_XVERSE_X_TARGET,
         PLAYER_RATING_CURRENT_TARGET,
         PLAYER_RATING_OLD_TARGET,

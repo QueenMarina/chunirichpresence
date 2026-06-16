@@ -71,6 +71,7 @@ When enabled, logs are written to `chunirichpresence.log` next to `chunirichpres
 ## Testing
 
 Tested in:
+- Chunithm XVERSEX 2.47
 - Chunithm XVERSE 2.41 Final
 - Chunithm VERSE
 - Chunithm Luminous
