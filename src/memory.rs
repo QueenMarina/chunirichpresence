@@ -19,7 +19,7 @@ use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 // Game-specific addresses and values.
 const GAME_MODULE_NAME: &[u8] = b"chusanApp.exe\0";
-const PLAY_STATE_VALUE_RVA: usize = 0x018849E0;
+const PLAY_STATE_VALUE_RVA: usize = 0x018EE320;
 const PLAY_STATE_VALUE_PLAYING: i32 = 2;
 const PLAY_STATE_VALUE_SONG_SELECT: i32 = 3;
 
@@ -36,6 +36,25 @@ const PE_SIZE_OF_IMAGE_OFFSET: usize = 0x50;
 // Cached values captured from runtime hooks.
 static SONG_ID_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_SONG_ID: AtomicI32 = AtomicI32::new(SONG_ID_UNSET);
+
+const SONG_ID_MATE_TARGET: HookTargetConfig = HookTargetConfig {
+    overwrite_len: 6,
+    fallback_rva: 0x0070333D,
+    pattern: &[
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x45),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x8D),
+        PatternByte::Exact(0x4D),
+        PatternByte::Exact(0x0C),
+        PatternByte::Exact(0x8A),
+        PatternByte::Exact(0x43),
+        PatternByte::Exact(0x04),
+        PatternByte::Exact(0x88),
+        PatternByte::Exact(0x45),
+        PatternByte::Exact(0x04),
+    ],
+};
 
 const SONG_ID_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
     overwrite_len: 7,
@@ -116,12 +135,25 @@ const SONG_ID_OLD_TARGET: HookTargetConfig = HookTargetConfig {
 
 const SONG_ID_HOOK: HookConfig = HookConfig {
     name: "song ID",
-    targets: &[SONG_ID_CURRENT_TARGET, SONG_ID_OLD_TARGET],
+    targets: &[SONG_ID_MATE_TARGET, SONG_ID_CURRENT_TARGET, SONG_ID_OLD_TARGET],
     callback: song_id_hook_callback,
 };
 
 static DIFFICULTY_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_DIFFICULTY: AtomicI32 = AtomicI32::new(DIFFICULTY_UNSET);
+
+const DIFFICULTY_MATE_TARGET: HookTargetConfig = HookTargetConfig {
+    overwrite_len: 6,
+    fallback_rva: 0x00703346,
+    pattern: &[
+        PatternByte::Exact(0x88),
+        PatternByte::Exact(0x45),
+        PatternByte::Exact(0x04),
+        PatternByte::Exact(0x8A),
+        PatternByte::Exact(0x43),
+        PatternByte::Exact(0x05),
+    ],
+};
 
 const DIFFICULTY_CURRENT_TARGET: HookTargetConfig = HookTargetConfig {
     overwrite_len: 6,
@@ -188,12 +220,40 @@ const DIFFICULTY_OLD_TARGET: HookTargetConfig = HookTargetConfig {
 
 const DIFFICULTY_HOOK: HookConfig = HookConfig {
     name: "difficulty",
-    targets: &[DIFFICULTY_CURRENT_TARGET, DIFFICULTY_OLD_TARGET],
+    targets: &[DIFFICULTY_MATE_TARGET, DIFFICULTY_CURRENT_TARGET, DIFFICULTY_OLD_TARGET],
     callback: difficulty_hook_callback,
 };
 
 static PLAYER_RATING_HOOK_STATE: HookState = HookState::new();
 static LAST_HOOKED_PLAYER_RATING: AtomicI32 = AtomicI32::new(PLAYER_RATING_UNSET);
+
+const PLAYER_RATING_MATE_TARGET: HookTargetConfig = HookTargetConfig {
+    overwrite_len: 6,
+    fallback_rva: 0x0072241D,
+    pattern: &[
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x82),
+        PatternByte::Exact(0x90),
+        PatternByte::Exact(0x01),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x8B),
+        PatternByte::Exact(0x81),
+        PatternByte::Exact(0xB4),
+        PatternByte::Exact(0x2F),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x0F),
+        PatternByte::Exact(0x95),
+        PatternByte::Exact(0xC3),
+        PatternByte::Exact(0x89),
+        PatternByte::Exact(0x82),
+        PatternByte::Exact(0x94),
+        PatternByte::Exact(0x01),
+        PatternByte::Exact(0x00),
+        PatternByte::Exact(0x00),
+    ],
+};
 
 const PLAYER_RATING_247_TARGET: HookTargetConfig = HookTargetConfig {
     overwrite_len: 6,
@@ -339,6 +399,7 @@ const PLAYER_RATING_OLD_TARGET: HookTargetConfig = HookTargetConfig {
 const PLAYER_RATING_HOOK: HookConfig = HookConfig {
     name: "player rating",
     targets: &[
+        PLAYER_RATING_MATE_TARGET,
         PLAYER_RATING_247_TARGET,
         PLAYER_RATING_XVERSE_X_TARGET,
         PLAYER_RATING_CURRENT_TARGET,
